@@ -2,6 +2,7 @@
 from __future__ import absolute_import
 
 import gc
+import os
 import atexit
 import threading
 import six
@@ -123,6 +124,24 @@ exit_timer = threading.Timer(util.addonSettings.maxShutdownWait, hardExit)
 exit_timer.name = 'HARDEXIT-TIMER'
 
 
+def _log_build_rev():
+    """Log a gitignored build_rev.txt if a deploy script left one next to the addon.
+
+    The addon version stays equal to upstream so the updater can still see a real
+    upgrade. The rev file is how a dev tree identifies itself in the Kodi log.
+    """
+    try:
+        rev_path = os.path.join(util.translatePath(util.ADDON.getAddonInfo('path')), 'build_rev.txt')
+        if not os.path.exists(rev_path):
+            return
+        with open(rev_path, 'r') as handle:
+            rev = handle.read().strip()
+        if rev:
+            util.LOG('Build rev: {0}', rev.splitlines()[0][:80])
+    except Exception:
+        pass
+
+
 def main(force_render=False):
     global BACKGROUND
 
@@ -177,6 +196,7 @@ def _main():
     #pr.enable()
 
     util.DEBUG_LOG('[ STARTED: {0} -------------------------------------------------------------------- ]', util.ADDON.getAddonInfo('version'))
+    _log_build_rev()
     if util.KODI_VERSION_MAJOR > 19 and util.DEBUG and util.getSetting('dump_config'):
         lv = len(util.ADDON.getAddonInfo('version'))
         util.DEBUG_LOG('[ SETTINGS DUMP {0}-------------------------------------------------------------------- '

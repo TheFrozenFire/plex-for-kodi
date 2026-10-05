@@ -1,6 +1,6 @@
 # coding=utf-8
 
-from lib import backgroundthread, logging as log, monitor
+from lib import backgroundthread, logging as log, monitor, timing
 from lib.windows import windowutils
 
 
@@ -29,11 +29,13 @@ class TasksMixin(object):
         task = SimpleTask().setup(func, self.default_callback, *args, **kwargs)
         backgroundthread.BGThreader.addTask(task)
 
-    def batch_simple(self, tasks):
+    def batch_simple(self, tasks, timing_span=None):
         batch = []
         for func, args, kwargs in tasks:
             task = SimpleTask().setup(func, self.default_callback, *(args or []), **(kwargs or {}))
             batch.append(task)
+        if timing_span is not None:
+            timing_span.after_tasks(batch)
         backgroundthread.BGThreader.addTasks(batch)
 
     def default_callback(self, task):

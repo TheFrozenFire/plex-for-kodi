@@ -1,0 +1,8 @@
+# Defect check only. The historical tree is not style-clean and is not
+# reformatted; CI points ruff at the dev-harness modules. `compileall`
+# is the syntax check for everything else.
+target-version = "py311"
+line-length = 120
+
+[lint]
+select = ["E9", "F"]

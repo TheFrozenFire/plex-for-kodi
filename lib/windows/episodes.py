@@ -11,6 +11,7 @@ from plexnet import plexapp, playlist, plexplayer, plexlibrary, util as pnUtil, 
 from lib import backgroundthread
 from lib import metadata
 from lib import player
+from lib import timing
 from lib import util
 from lib.util import T
 from lib.language_util import getNativeLanguages
@@ -352,6 +353,10 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
 
     @busy.dialog(delay_time=2.5)
     def _onFirstInit(self):
+        with timing.span("open.season"):
+            self._openSeason()
+
+    def _openSeason(self):
         self.episodeListControl = kodigui.ManagedControlList(self, self.EPISODE_LIST_ID, 5)
         self.progressImageControl = self.getControl(self.PROGRESS_IMAGE_ID)
 
@@ -388,6 +393,7 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
 
         self.openedWithAutoPlay = False
 
+    @timing.span_func("return.season")
     @busy.dialog()
     def onReInit(self):
         self.playBtnClicked = False
@@ -520,6 +526,7 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         self.updateProperties()
         self.setBoolProperty("initialized", True)
         self.fillEpisodes(from_redirect=from_redirect)
+        timing.current().mark("first")
 
         # postpone less important tasks
         self.batch_simple([
@@ -527,7 +534,7 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
             (self.fillExtras, None, None),
             (self.fillRelated, None, None),
             (self.fillRoles, None, None),
-        ])
+        ], timing_span=timing.current())
 
         if not self.directlyFromWatchlist:
             self.checkIsWatchlisted(self.show_)

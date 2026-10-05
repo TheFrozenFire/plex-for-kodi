@@ -7,6 +7,7 @@ from kodi_six import xbmcgui
 from plexnet import plexplayer, media, plexobjects, util as pnUtil, plexapp, plexlibrary, playlist, playqueue
 
 from lib import metadata
+from lib import timing
 from lib import util
 from lib.util import T
 from lib.language_util import getNativeLanguages
@@ -159,6 +160,10 @@ class PrePlayWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RatingsMixi
         kodigui.ControlledWindow.doClose(self)
 
     def onFirstInit(self):
+        with timing.span("open.detail"):
+            self._openDetail()
+
+    def _openDetail(self):
         self.extraListControl = kodigui.ManagedControlList(self, self.EXTRA_LIST_ID, 5)
         self.relatedListControl = kodigui.ManagedControlList(self, self.RELATED_LIST_ID, 5)
         self.rolesListControl = kodigui.ManagedControlList(self, self.ROLES_LIST_ID, 5)
@@ -179,6 +184,7 @@ class PrePlayWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RatingsMixi
         self.openedWithAutoPlay = True
         return self.playVideo(from_auto_play=True)
 
+    @timing.span_func("return.detail")
     @busy.dialog()
     def onReInit(self):
         PlaybackBtnMixin.onReInit(self)
@@ -685,12 +691,14 @@ class PrePlayWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RatingsMixi
             self.checkIsWatchlisted(self.video)
 
         self.setInfo()
+        timing.current().mark("first")
         self.setBoolProperty("initialized", True)
         self.batch_simple([(self.fillRoles, None, None),
                            (self.fillReviews, None, None),
                            (self.fillExtras, None, None),
                            (self.fillRelated, None, None),
-                           (self.fillCollections, None, None)])
+                           (self.fillCollections, None, None)],
+                          timing_span=timing.current())
 
     def setInfo(self, skip_bg=False):
         if not skip_bg:

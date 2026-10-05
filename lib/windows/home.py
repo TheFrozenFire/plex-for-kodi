@@ -13,6 +13,7 @@ from six.moves import range
 
 from lib import backgroundthread
 from lib import player
+from lib import timing
 from lib import util
 from lib.path_mapping import pmm
 from lib.plex_hosts import pdm
@@ -730,6 +731,10 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         util.setGlobalBoolProperty('off.sections', '')
 
     def onFirstInit(self):
+        with timing.span("home.load") as span:
+            self._loadHome(span)
+
+    def _loadHome(self, span):
         # Migrate existing CE_VS10 users: inject video_show_vs10 into saved button list
         # if it was saved before the VS10 feature existed
         if util.CE_VS10 and not util.getSetting('vs10_button_migrated', False):
@@ -768,7 +773,10 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
 
         self.bottomItem = 0
         if self.serverRefresh():
+            span.mark("first")
             self.setFocusId(self.SECTION_LIST_ID)
+        else:
+            span.mark("first")
 
         self.hookSignals()
         util.CRON.registerReceiver(self)
@@ -787,6 +795,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             util.DEBUG_LOG("Home: Go root requested, reinitializing")
             self.onReInit()
 
+    @timing.span_func("return.home")
     def onReInit(self):
         util.DEBUG_LOG("Home: On ReInit")
         if self._ignoreReInit or time.time() < self._goRootHoldUntil:
@@ -3774,10 +3783,12 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                     if pending_libs == 0 and pending_cross == 0:
                         # All sources already done, draw now
                         self.showHubs(section, update=update, reselect_pos_dict=reselect_pos_dict)
+                        self._noteHubsTiming(final=True)
                     # else: wait for library/cross-section tasks to finish
                 else:
                     # No cross-section hubs — draw immediately
                     self.showHubs(section, update=update, reselect_pos_dict=reselect_pos_dict)
+                    self._noteHubsTiming(final=True)
             else:
                 # Library section completed
                 if self.lastSection == section:
@@ -3796,6 +3807,14 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                     if self._pendingLibrarySections == 0 and on_home and has_cross:
                         if self.sectionHubs.get(None) is not None:
                             self.showHubs(self.lastSection, update=False)
+                            self._noteHubsTiming(final=True)
+
+    def _noteHubsTiming(self, final):
+        span = getattr(self, "_hubs_span", None)
+        timing.mark(span, "first")
+        if final:
+            timing.finish(span)
+            self._hubs_span = None
 
     def updateHubCallback(self, hub, items=None, reselect_pos=None):
         with self.lock:
@@ -3960,7 +3979,13 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             self.tasks += [PinnedTypeHubsTask().setup(s, self.sectionHubsCallback)
                            for s in sections if isinstance(s, PinnedTypeSection)
                            and not s.server.DEFER_HUBS]
-            backgroundthread.BGThreader.addTasks(self.tasks)
+            timing.finish(getattr(self, "_hubs_span", None))
+            self._hubs_span = timing.begin("home.hubs") if self.tasks else None
+            if self.tasks:
+                backgroundthread.BGThreader.addTasks(self.tasks)
+            else:
+                timing.finish(self._hubs_span)
+                self._hubs_span = None
 
         show_pm_indicator = util.getSetting('path_mapping_indicators')
         for section in sections:

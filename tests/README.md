@@ -9,7 +9,12 @@ before anything under `lib/` is imported.
 python3 -m pytest                          # nicest output
 python3 -m pytest tests/test_templates.py  # one area
 python3 -m unittest discover -s tests -t . # no dependencies at all
+python3 -m compileall -q lib default.py service.py plugin.py screensaver.py
 ```
+
+GitHub Actions (`.github/workflows/offline.yml`) runs that compile, `ruff` on
+the small dev-only modules, and `pytest` on Python 3.11. The rest of the tree
+is not style-clean; don't turn ruff loose on it.
 
 Tests are plain `unittest.TestCase` classes, so both runners work. pytest is
 optional and only buys better output and `-k` filtering.

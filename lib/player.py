@@ -16,6 +16,7 @@ from . import backgroundthread
 from . import kodijsonrpc
 from . import colors
 from .windows import seekdialog, windowutils, blackoutdialog
+from . import timing
 from . import util
 from . import seamless_branching
 from .language_util import getNativeLanguages, resolveLanguage
@@ -2532,19 +2533,28 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
             backgroundthread.BGThreader.addTask(self.BGMTask)
 
     def playVideo(self, video, resume=False, force_update=False, session_id=None, handler=None):
-        if self.bgmPlaying:
-            self.stopAndWait()
+        span = timing.begin("playback.start")
+        self._pb_span = span
+        try:
+            if self.bgmPlaying:
+                self.stopAndWait()
 
-        if handler and isinstance(handler, SeekPlayerHandler):
-            self.handler = handler
-            self.handler.reused = True
-        else:
-            self.handler = SeekPlayerHandler(self, session_id or self.sessionID)
+            if handler and isinstance(handler, SeekPlayerHandler):
+                self.handler = handler
+                self.handler.reused = True
+            else:
+                self.handler = SeekPlayerHandler(self, session_id or self.sessionID)
 
-        self.video = video
-        self.resume = resume
-        self.open()
-        self._playVideo(resume and video.viewOffset.asInt() or 0, force_update=force_update, session_id=session_id)
+            self.video = video
+            self.resume = resume
+            self.open()
+            self._playVideo(resume and video.viewOffset.asInt() or 0, force_update=force_update, session_id=session_id)
+        except Exception:
+            timing.finish(span)
+            self._pb_span = None
+            raise
+        finally:
+            timing.pause_span(span)
 
     def getOSSPathHint(self, meta):
         # only hint the path one folder above for a movie, two folders above for TV
@@ -2577,9 +2587,13 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
             raise
         except:
             util.ERROR(notify=True)
+            timing.finish(getattr(self, "_pb_span", None))
+            self._pb_span = None
             return
 
         meta = self.playerObject.metadata
+        mode = "transcode" if getattr(meta, "isTranscoded", False) else "direct"
+        timing.play_phase(getattr(self, "_pb_span", None), "decision", mode=mode)
         url = meta.streamUrls[0]
 
         bifURL = self.playerObject.getBifUrl()
@@ -2662,6 +2676,7 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
             probOff = self.handler.getIntroOffset(offset, setSkipped=True)
             if probOff:
                 introOffset = probOff
+        timing.play_phase(getattr(self, "_pb_span", None), "markers")
 
         if meta.isTranscoded:
             self.handler.mode = self.handler.MODE_RELATIVE
@@ -2833,6 +2848,7 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
         self.trigger('starting.video')
         self.handler.queuingNext = False
         self.handler.queuingSpecific = False
+        timing.play_phase(getattr(self, "_pb_span", None), "stream_open")
         self.play(url, li)
 
     def playVideoPlaylist(self, playlist, resume=False, handler=None, session_id=None):
@@ -3017,8 +3033,11 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
         self.trigger('playback.started')
 
         if not self.handler:
+            timing.play_phase(getattr(self, "_pb_span", None), "playing")
             return
+        timing.play_phase(getattr(self, "_pb_span", None), "playing")
         self.handler.onPlayBackStarted()
+        timing.play_phase(getattr(self, "_pb_span", None), "subtitles")
 
     def onAVChange(self):
         if not self.sessionID:
@@ -3040,6 +3059,11 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
         self.isExternal = self.isExternalPlayer()
         self.trigger('av.started')
         self.started = True
+        span = getattr(self, "_pb_span", None)
+        timing.play_phase(span, "first_frame")
+        timing.mark(span, "first")
+        timing.finish(span)
+        self._pb_span = None
         if not self.handler:
             return
         self.handler.onAVStarted()

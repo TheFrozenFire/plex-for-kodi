@@ -18,6 +18,14 @@
                     <default>false</default>
                     <control type="toggle"/>
                 </setting>
+                <!-- Hidden developer switch. Off by default; PM4K_TIMING=1 is equivalent.
+                     Not shown in the settings UI. -->
+                <setting id="timing_log" type="boolean" label="35050" help="35051">
+                    <level>0</level>
+                    <default>false</default>
+                    <visible>false</visible>
+                    <control type="toggle"/>
+                </setting>
                 <setting id="kiosk.always" type="boolean" label="33735" help="33736">
                     <level>0</level>
                     <default>true</default>

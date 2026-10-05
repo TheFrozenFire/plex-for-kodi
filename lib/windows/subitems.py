@@ -7,6 +7,7 @@ from kodi_six import xbmcgui
 from plexnet import playlist, util as pnUtil, plexapp, plexlibrary
 
 from lib import metadata
+from lib import timing
 from lib import util
 from lib.util import T
 from lib.language_util import getNativeLanguages
@@ -104,17 +105,18 @@ class ShowWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMixin, 
         TasksMixin.doClose(self)
 
     def onFirstInit(self):
-        self.focusPlayButton()
-        self.subItemListControl = kodigui.ManagedControlList(self, self.SUB_ITEM_LIST_ID, 5)
-        self.rolesListControl = kodigui.ManagedControlList(self, self.ROLES_LIST_ID, 5)
-        self.extraListControl = kodigui.ManagedControlList(self, self.EXTRA_LIST_ID, 5)
-        self.relatedListControl = kodigui.ManagedControlList(self, self.RELATED_LIST_ID, 5)
+        with timing.span("open.show"):
+            self.focusPlayButton()
+            self.subItemListControl = kodigui.ManagedControlList(self, self.SUB_ITEM_LIST_ID, 5)
+            self.rolesListControl = kodigui.ManagedControlList(self, self.ROLES_LIST_ID, 5)
+            self.extraListControl = kodigui.ManagedControlList(self, self.EXTRA_LIST_ID, 5)
+            self.relatedListControl = kodigui.ManagedControlList(self, self.RELATED_LIST_ID, 5)
 
-        self.progressImageControl = self.getControl(self.PROGRESS_IMAGE_ID)
+            self.progressImageControl = self.getControl(self.PROGRESS_IMAGE_ID)
 
-        self.setup()
-        self.initialized = True
-        self.themeMusicInit(self.mediaItem)
+            self.setup()
+            self.initialized = True
+            self.themeMusicInit(self.mediaItem)
 
     def onReInit(self):
         PlaybackBtnMixin.onReInit(self)
@@ -139,11 +141,13 @@ class ShowWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMixin, 
             self.setBoolProperty("is_watchlisted", self.is_watchlisted)
 
         self.updateProperties()
+        timing.current().mark("first")
         self.setBoolProperty("initialized", True)
         self.batch_simple([(self.fill, None, None),
                            (self.fillExtras, None, None),
                            (self.fillRelated, None, None),
-                           (self.fillRoles, None, None)])
+                           (self.fillRoles, None, None)],
+                          timing_span=timing.current())
 
     def updateProperties(self):
         self.setProperty('title', self.mediaItem.title)

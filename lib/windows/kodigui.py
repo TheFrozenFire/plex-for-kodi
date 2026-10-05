@@ -568,6 +568,17 @@ class EmptyDataSource(DummyDataSource):
 
 DUMMY_DATA_SOURCE = DummyDataSource()
 
+_ART_PROPS = frozenset((
+    "thumb", "art", "background", "background_static", "clear.logo", "preview",
+))
+
+
+def _watch_art(url):
+    if not url:
+        return
+    from lib import timing
+    timing.watch_art(url)
+
 
 class ManagedListItem(object):
     __slots__ = ("_listItem", "dataSource", "properties", "label", "label2", "iconImage", "thumbnailImage", "path",
@@ -577,6 +588,7 @@ class ManagedListItem(object):
                  properties=None):
         self._listItem = xbmcgui.ListItem(label, label2, path=path)
         self._listItem.setArt({"thumb": thumbnailImage, "icon": iconImage})
+        _watch_art(thumbnailImage)
         self.dataSource = data_source
         self.properties = {}
         self.label = label
@@ -677,6 +689,9 @@ class ManagedListItem(object):
         return self.listItem.select(selected)
 
     def setArt(self, values):
+        if values:
+            for value in values.values():
+                _watch_art(value)
         return self.listItem.setArt(values)
 
     def setIconImage(self, icon):
@@ -706,6 +721,8 @@ class ManagedListItem(object):
             self._manager._properties[key] = 1
         self.properties[key] = value
         self.listItem.setProperty(key, value)
+        if key in _ART_PROPS:
+            _watch_art(value)
         return self
 
     def setProperties(self, prop_list, val_list_or_val):
@@ -725,6 +742,7 @@ class ManagedListItem(object):
 
     def setThumbnailImage(self, thumb):
         self.thumbnailImage = thumb
+        _watch_art(thumb)
         return self.listItem.setArt({"thumb": self.thumbnailImage})
 
     def onDestroy(self):
