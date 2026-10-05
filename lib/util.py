@@ -48,7 +48,7 @@ PROFILE = translatePath(ADDON.getAddonInfo('profile'))
 
 
 DEF_THEME = "modern-colored"
-THEME_VERSION = 98
+THEME_VERSION = 99
 
 UI_INTERVAL = 1 / float(addonSettings.uiWaitRate)
 
@@ -594,7 +594,11 @@ def getShortDateFormat():
         if fromAPI == "regional":
             return xbmc.getRegion('dateshort').replace('%-d', '%d')
         else:
-            return fromAPI.replace("DD", "%d").replace("MM", "%m").replace("YYYY", "%Y")
+            nonPad = "%#" if sys.platform == "win32" else "%-"
+            tokens = {"DD": "%d", "D": nonPad + "d", "MM": "%m", "M": nonPad + "m",
+                      "mmm": "%b", "YYYY": "%Y", "YY": "%y"}
+            # Match longest tokens first, in one pass, without reprocessing strftime directives.
+            return re.sub(r"YYYY|YY|mmm|DD|D|MM|M", lambda match: tokens[match.group(0)], fromAPI)
     except:
         DEBUG_LOG("Couldn't get locale.shortdateformat setting, falling back to MM/DD/YYYY")
         return "%d/%m/%Y"

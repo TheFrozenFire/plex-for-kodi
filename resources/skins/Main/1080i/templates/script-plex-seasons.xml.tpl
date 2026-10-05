@@ -271,6 +271,8 @@
         </control> -->
         {% include "includes/wl_availability.xml.tpl" %}
         <control type="textbox">
+            <!-- Use the availability row for the summary when there is no availability message. -->
+            <animation effect="slide" end="0,{{ vscale(-63) }}" time="0" condition="String.IsEmpty(Window.Property(wl_server_availability_verbose))">Conditional</animation>
             <posx>466</posx>
             <posy>{{ vscale(286) }}</posy>
             <width>1360</width>
