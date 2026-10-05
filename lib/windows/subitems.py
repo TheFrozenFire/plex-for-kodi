@@ -141,7 +141,10 @@ class ShowWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMixin, 
             self.setBoolProperty("is_watchlisted", self.is_watchlisted)
 
         self.updateProperties()
-        timing.current().mark("first")
+        try:
+            timing.current().mark("first")
+        except Exception:
+            util.DEBUG_LOG("timing hook failed")
         self.setBoolProperty("initialized", True)
         self.batch_simple([(self.fill, None, None),
                            (self.fillExtras, None, None),

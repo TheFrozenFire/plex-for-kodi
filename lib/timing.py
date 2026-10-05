@@ -18,7 +18,9 @@ the texture database, or the network. When on, lines look like::
     TIMING PLAY id=s2 phase=decision mode=direct ms=220
 
 Hosts other than ``*.plex.tv`` are written as ``{server}``. Numeric path ids
-and token-like query values are redacted.
+and token-like query values are redacted. That same redaction is applied to
+every logged field, including ``thread`` (some request threads are named with
+the full URL). Hook failures are logged and swallowed.
 """
 from __future__ import absolute_import
 
@@ -33,6 +35,11 @@ from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlsplit
 
 _TOKEN_RE = re.compile(r"(X-Plex-Token=)[^&\s]+", re.IGNORECASE)
+_URL_IN_TEXT = re.compile(r"https?://[^\s]+", re.IGNORECASE)
+_QUERY_SECRET = re.compile(
+    r"((?:[^&\s]*token|identifier|session|auth)[^=&\s]*=)[^&\s]+",
+    re.IGNORECASE,
+)
 _DIGITS = re.compile(r"/\d+")
 _UUID = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
@@ -124,6 +131,21 @@ def redact_endpoint(url):
     return endpoint
 
 
+def redact_text(value):
+    """Redact tokens and URLs inside any logged field, not only ``endpoint``."""
+    text = str(value)
+
+    def _swap(match):
+        try:
+            return redact_endpoint(match.group(0))
+        except Exception:
+            return "{server}"
+
+    text = _URL_IN_TEXT.sub(_swap, text)
+    text = _QUERY_SECRET.sub(r"\1****", text)
+    return redact_token(text)
+
+
 def _env_flag():
     raw = os.environ.get("PM4K_TIMING")
     if raw is None or raw == "":
@@ -169,7 +191,17 @@ def timing_enabled():
 def _emit(message):
     try:
         from .logging import log
-        log(message)
+        text = redact_text(message).replace("\n", " ").replace("\r", " ")
+        log(text)
+    except Exception:
+        pass
+
+
+def _log_hook_failure(where, exc):
+    """A timing bug must not escape into the add-on. The record is redacted."""
+    try:
+        detail = redact_text("{0}: {1}".format(type(exc).__name__, exc))
+        _emit("TIMING HOOK name={0} error={1}".format(where, detail))
     except Exception:
         pass
 
@@ -204,22 +236,28 @@ class Span(object):
         self._lock = threading.Lock()
 
     def mark(self, phase="first"):
-        with self._lock:
-            if phase in self._marks or self._finished:
-                return
-            self._marks.add(phase)
-        _emit("TIMING SPAN id={0} name={1} phase={2} ms={3:.0f}".format(
-            self.id, self.name, phase, _ms(self.started)))
+        try:
+            with self._lock:
+                if phase in self._marks or self._finished:
+                    return
+                self._marks.add(phase)
+            _emit("TIMING SPAN id={0} name={1} phase={2} ms={3:.0f}".format(
+                self.id, redact_text(self.name), redact_text(phase), _ms(self.started)))
+        except Exception as exc:
+            _log_hook_failure("mark", exc)
 
     def after_tasks(self, tasks):
         """Hold ``phase=full`` until each of ``tasks`` has finished."""
-        with self._lock:
-            self._defer = True
-            for task in tasks:
-                if getattr(task, "_timing_release", None) is self:
-                    continue
-                task._timing_release = self
-                self._waiting += 1
+        try:
+            with self._lock:
+                self._defer = True
+                for task in tasks:
+                    if getattr(task, "_timing_release", None) is self:
+                        continue
+                    task._timing_release = self
+                    self._waiting += 1
+        except Exception as exc:
+            _log_hook_failure("after_tasks", exc)
 
     def _drop_from_thread(self):
         stack = _ctx.get()
@@ -240,7 +278,7 @@ class Span(object):
 
 def _emit_full(span):
     _emit("TIMING SPAN id={0} name={1} phase=full ms={2:.0f}".format(
-        span.id, span.name, _ms(span.started)))
+        span.id, redact_text(span.name), _ms(span.started)))
 
 
 def _push(span):
@@ -249,52 +287,90 @@ def _push(span):
 
 def begin(name):
     """Open a span, or return a no-op object when timing is off."""
-    if not timing_enabled():
+    try:
+        if not timing_enabled():
+            return _NULL
+        opened = Span(name)
+        _push(opened)
+        parent = opened.parent.id if opened.parent is not None else "-"
+        _emit("TIMING SPAN id={0} name={1} phase=begin parent={2}".format(
+            opened.id, redact_text(opened.name), redact_text(parent)))
+        return opened
+    except Exception as exc:
+        _log_hook_failure("begin", exc)
         return _NULL
-    span = Span(name)
-    _push(span)
-    parent = span.parent.id if span.parent is not None else "-"
-    _emit("TIMING SPAN id={0} name={1} phase=begin parent={2}".format(span.id, span.name, parent))
-    return span
+
+
+def mark(span, phase="first"):
+    """Log ``phase`` on ``span``.
+
+    None and disabled spans (timing off, or a no-op span) do nothing.
+    Never raises.
+    """
+    try:
+        if not timing_enabled():
+            return
+        if span is None or not getattr(span, "real", False):
+            return
+        span.mark(phase)
+    except Exception as exc:
+        _log_hook_failure("mark", exc)
 
 
 def finish(span):
     """Close ``span``. If it is waiting on tasks, ``phase=full`` is logged when they finish."""
-    if not getattr(span, "real", False):
-        return
-    span._drop_from_thread()
-    with span._lock:
-        span._exit_done = True
-    if span._maybe_full():
-        _emit_full(span)
+    try:
+        if not getattr(span, "real", False):
+            return
+        span._drop_from_thread()
+        with span._lock:
+            span._exit_done = True
+        if span._maybe_full():
+            _emit_full(span)
+    except Exception as exc:
+        _log_hook_failure("finish", exc)
 
 
 def pause_span(span):
     """Drop ``span`` from this thread without logging ``phase=full``."""
-    if not getattr(span, "real", False):
-        return
-    span._drop_from_thread()
+    try:
+        if not getattr(span, "real", False):
+            return
+        span._drop_from_thread()
+    except Exception as exc:
+        _log_hook_failure("pause_span", exc)
 
 
 def current():
-    if not timing_enabled():
+    try:
+        if not timing_enabled():
+            return _NULL
+        stack = _ctx.get()
+        kept = tuple(item for item in stack if getattr(item, "real", False) and not item._finished)
+        if len(kept) != len(stack):
+            _ctx.set(kept)
+        if kept:
+            return kept[-1]
         return _NULL
-    stack = _ctx.get()
-    kept = tuple(span for span in stack if getattr(span, "real", False) and not span._finished)
-    if len(kept) != len(stack):
-        _ctx.set(kept)
-    if kept:
-        return kept[-1]
-    return _NULL
+    except Exception as exc:
+        _log_hook_failure("current", exc)
+        return _NULL
 
 
 @contextmanager
 def span(name):
-    opened = begin(name)
+    try:
+        opened = begin(name)
+    except Exception as exc:
+        _log_hook_failure("span", exc)
+        opened = _NULL
     try:
         yield opened
     finally:
-        finish(opened)
+        try:
+            finish(opened)
+        except Exception as exc:
+            _log_hook_failure("span", exc)
 
 
 def span_func(name):
@@ -305,7 +381,7 @@ def span_func(name):
                 try:
                     return func(*args, **kwargs)
                 finally:
-                    opened.mark("first")
+                    mark(opened, "first")
         wrapper.__name__ = getattr(func, "__name__", "span_func")
         wrapper.__doc__ = getattr(func, "__doc__", None)
         return wrapper
@@ -314,48 +390,74 @@ def span_func(name):
 
 def note_task(task):
     """Remember the current span on a background task. No-op when timing is off."""
-    if not timing_enabled():
-        return
-    span = current()
-    if getattr(span, "real", False):
-        task._timing_span = span
+    try:
+        if not timing_enabled():
+            return
+        opened = current()
+        if getattr(opened, "real", False):
+            task._timing_span = opened
+    except Exception as exc:
+        _log_hook_failure("note_task", exc)
 
 
 def release_task(task):
-    span = getattr(task, "_timing_release", None)
-    if not getattr(span, "real", False):
-        return
-    task._timing_release = None
-    with span._lock:
-        span._waiting -= 1
-    if span._maybe_full():
-        _emit_full(span)
+    try:
+        opened = getattr(task, "_timing_release", None)
+        if not getattr(opened, "real", False):
+            return
+        task._timing_release = None
+        with opened._lock:
+            opened._waiting -= 1
+        if opened._maybe_full():
+            _emit_full(opened)
+    except Exception as exc:
+        _log_hook_failure("release_task", exc)
 
 
 @contextmanager
-def adopt(span):
-    """Run ``span`` as the current span on this thread. No-op for a null span."""
-    if not getattr(span, "real", False):
+def adopt(opened):
+    """Run ``opened`` as the current span on this thread. No-op for a null span."""
+    try:
+        real = getattr(opened, "real", False)
+    except Exception as exc:
+        _log_hook_failure("adopt", exc)
         yield
         return
-    _push(span)
+    if not real:
+        yield
+        return
+    try:
+        _push(opened)
+    except Exception as exc:
+        _log_hook_failure("adopt", exc)
+        yield
+        return
     try:
         yield
     finally:
-        span._drop_from_thread()
+        try:
+            opened._drop_from_thread()
+        except Exception as exc:
+            _log_hook_failure("adopt", exc)
 
 
 def play_phase(span, phase, mode=""):
-    if not getattr(span, "real", False):
-        return
-    mode_bit = " mode={0}".format(mode) if mode else ""
-    _emit("TIMING PLAY id={0} phase={1}{2} ms={3:.0f}".format(
-        span.id, phase, mode_bit, _ms(span.started)))
+    try:
+        if not getattr(span, "real", False):
+            return
+        mode_bit = " mode={0}".format(redact_text(mode)) if mode else ""
+        _emit("TIMING PLAY id={0} phase={1}{2} ms={3:.0f}".format(
+            span.id, redact_text(phase), mode_bit, _ms(span.started)))
+    except Exception as exc:
+        _log_hook_failure("play_phase", exc)
 
 
 def _thread_name():
-    name = threading.current_thread().name or "?"
-    return name.replace(" ", "_")
+    try:
+        name = threading.current_thread().name or "?"
+        return redact_text(name).replace(" ", "_").replace("\n", "_").replace("\r", "_")
+    except Exception:
+        return "?"
 
 
 def _ui_blocked():
@@ -395,7 +497,12 @@ def _response_ttfb_ms(response, total_ms):
 
 def observe_http(method, url, func):
     """Time one HTTP call. ``func`` performs the request and returns the response."""
-    if not timing_enabled():
+    try:
+        enabled = timing_enabled()
+    except Exception as exc:
+        _log_hook_failure("observe_http", exc)
+        enabled = False
+    if not enabled:
         return func()
     started = time.perf_counter()
     response = None
@@ -405,8 +512,8 @@ def observe_http(method, url, func):
     finally:
         try:
             _log_http(method, url, response, started)
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_hook_failure("observe_http", exc)
 
 
 def _log_http(method, url, response, started):
@@ -426,14 +533,14 @@ def _log_http(method, url, response, started):
     _emit(
         "TIMING REQ span={0} method={1} endpoint={2} status={3} bytes={4} "
         "ttfb_ms={5:.0f} total_ms={6:.0f} cache={7} thread={8} ui_blocked={9}".format(
-            span_id,
-            str(method).upper(),
-            redact_endpoint(url),
+            redact_text(span_id),
+            redact_text(str(method).upper()),
+            redact_text(redact_endpoint(url)),
             status,
             nbytes,
             ttfb,
             total_ms,
-            cache,
+            redact_text(cache),
             _thread_name(),
             _ui_blocked(),
         )
@@ -441,13 +548,18 @@ def _log_http(method, url, response, started):
 
 
 def _emit_line(label, elapsed):
-    _emit("TIMING {0} {1:.0f}ms".format(redact_token(label), elapsed * 1000.0))
+    _emit("TIMING {0} {1:.0f}ms".format(redact_text(label), elapsed * 1000.0))
 
 
 @contextmanager
 def timed(label):
     """Log the wall time of the wrapped block when timing is enabled."""
-    if not timing_enabled():
+    try:
+        enabled = timing_enabled()
+    except Exception as exc:
+        _log_hook_failure("timed", exc)
+        enabled = False
+    if not enabled:
         yield
         return
     started = time.perf_counter()
@@ -456,8 +568,8 @@ def timed(label):
     finally:
         try:
             _emit_line(label, time.perf_counter() - started)
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_hook_failure("timed", exc)
 
 
 def timed_call(label):
@@ -489,57 +601,63 @@ def set_art_probe(probe):
 
 def watch_art(url):
     """Start the clock for one image URL. No-op when timing is off or the URL is local."""
-    if not timing_enabled():
-        return
-    if not url:
-        return
-    text = str(url)
-    if not (text.startswith("http://") or text.startswith("https://")):
-        return
-    active = current()
-    item = {
-        "url": text,
-        "t0": time.perf_counter(),
-        "span": active.id if getattr(active, "real", False) else "-",
-    }
-    if _art_ready(text) is True:
-        _emit_art(item, "hit", 0.0)
-        return
-    with _art_lock:
-        if any(pending["url"] == text for pending in _art_pending):
+    try:
+        if not timing_enabled():
             return
-        _art_pending.append(item)
-    if _art_probe is None:
-        _ensure_art_thread()
+        if not url:
+            return
+        text = str(url)
+        if not (text.startswith("http://") or text.startswith("https://")):
+            return
+        active = current()
+        item = {
+            "url": text,
+            "t0": time.perf_counter(),
+            "span": active.id if getattr(active, "real", False) else "-",
+        }
+        if _art_ready(text) is True:
+            _emit_art(item, "hit", 0.0)
+            return
+        with _art_lock:
+            if any(pending["url"] == text for pending in _art_pending):
+                return
+            _art_pending.append(item)
+        if _art_probe is None:
+            _ensure_art_thread()
+    except Exception as exc:
+        _log_hook_failure("watch_art", exc)
 
 
 def poll_art():
     """Check pending image URLs once. The background thread and tests both call this."""
-    if not timing_enabled():
+    try:
+        if not timing_enabled():
+            with _art_lock:
+                _art_pending[:] = []
+            return
+        now = time.perf_counter()
         with _art_lock:
-            _art_pending[:] = []
-        return
-    now = time.perf_counter()
-    with _art_lock:
-        pending = list(_art_pending)
-    done = []
-    for item in pending:
-        ready = _art_ready(item["url"])
-        elapsed = (now - item["t0"]) * 1000.0
-        if ready is True:
-            _emit_art(item, "miss", elapsed)
-            done.append(item["url"])
-        elif now - item["t0"] >= _ART_TIMEOUT:
-            _emit_art(item, "timeout", elapsed)
-            done.append(item["url"])
-    if done:
-        with _art_lock:
-            _art_pending[:] = [item for item in _art_pending if item["url"] not in done]
+            pending = list(_art_pending)
+        done = []
+        for item in pending:
+            ready = _art_ready(item["url"])
+            elapsed = (now - item["t0"]) * 1000.0
+            if ready is True:
+                _emit_art(item, "miss", elapsed)
+                done.append(item["url"])
+            elif now - item["t0"] >= _ART_TIMEOUT:
+                _emit_art(item, "timeout", elapsed)
+                done.append(item["url"])
+        if done:
+            with _art_lock:
+                _art_pending[:] = [item for item in _art_pending if item["url"] not in done]
+    except Exception as exc:
+        _log_hook_failure("poll_art", exc)
 
 
 def _emit_art(item, cache, elapsed):
     _emit("TIMING ART span={0} cache={1} ms={2:.0f} endpoint={3}".format(
-        item["span"], cache, elapsed, redact_endpoint(item["url"])))
+        redact_text(item["span"]), redact_text(cache), elapsed, redact_text(redact_endpoint(item["url"]))))
 
 
 def _ensure_art_thread():

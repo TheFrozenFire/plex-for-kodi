@@ -1592,7 +1592,10 @@ class LibraryWindow(PlaybackBtnMixin, kodigui.MultiWindow, windowutils.UtilMixin
                 else:
                     self.setBoolProperty('no.content', True)
 
-                timing.current().mark("first")
+                try:
+                    timing.current().mark("first")
+                except Exception:
+                    util.DEBUG_LOG("timing hook failed")
                 return
             else:
                 for startPosition in range(0, totalSize, self.getDefChunkSize(totalSize)):
@@ -1623,7 +1626,10 @@ class LibraryWindow(PlaybackBtnMixin, kodigui.MultiWindow, windowutils.UtilMixin
                 if jumpList is None:
                     util.messageDialog("Error", "There was an error.")
 
-                timing.current().mark("first")
+                try:
+                    timing.current().mark("first")
+                except Exception:
+                    util.DEBUG_LOG("timing hook failed")
                 return
 
             idx = 0
@@ -1662,7 +1668,10 @@ class LibraryWindow(PlaybackBtnMixin, kodigui.MultiWindow, windowutils.UtilMixin
 
         self.showPanelControl.selectItem(0)
         self.setFocusId(self.POSTERS_PANEL_ID)
-        timing.current().mark("first")
+        try:
+            timing.current().mark("first")
+        except Exception:
+            util.DEBUG_LOG("timing hook failed")
 
         tasks = []
         for startChunkPosition in range(0, totalSize, self.CHUNK_SIZE):
@@ -1682,7 +1691,10 @@ class LibraryWindow(PlaybackBtnMixin, kodigui.MultiWindow, windowutils.UtilMixin
                 self.alreadyFetchedChunkList.add(startChunkPosition)
                 break
 
-        timing.current().after_tasks(tasks)
+        try:
+            timing.current().after_tasks(tasks)
+        except Exception:
+            util.DEBUG_LOG("timing hook failed")
         self.tasks.add(tasks)
         backgroundthread.BGThreader.addTasksToFront(tasks)
 
@@ -1829,7 +1841,10 @@ class LibraryWindow(PlaybackBtnMixin, kodigui.MultiWindow, windowutils.UtilMixin
     def _chunkCallback(self, items, start):
         if not self.showPanelControl or not items or self.closing:
             return
-        timing.current().mark("first")
+        try:
+            timing.current().mark("first")
+        except Exception:
+            util.DEBUG_LOG("timing hook failed")
 
         with self.lock:
             pos = start
@@ -1988,7 +2003,10 @@ class LibraryWindow(PlaybackBtnMixin, kodigui.MultiWindow, windowutils.UtilMixin
                 task = ChunkRequestTask().setup(self.section, startChunkPosition, self.CHUNK_SIZE,
                                                 self._chunkCallback, filter_=self.getFilterOpts(), sort=self.getSortOpts(),
                                                 subDir=self.subDir, bool_filters=self.boolFilters)
-                page_span.after_tasks([task])
+                try:
+                    page_span.after_tasks([task])
+                except Exception:
+                    util.DEBUG_LOG("timing hook failed")
                 self.tasks.add(task)
                 backgroundthread.BGThreader.addTasksToFront([task])
 

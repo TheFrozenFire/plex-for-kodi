@@ -2533,7 +2533,11 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
             backgroundthread.BGThreader.addTask(self.BGMTask)
 
     def playVideo(self, video, resume=False, force_update=False, session_id=None, handler=None):
-        span = timing.begin("playback.start")
+        try:
+            span = timing.begin("playback.start")
+        except Exception:
+            util.DEBUG_LOG("Player: timing hook failed")
+            span = None
         self._pb_span = span
         try:
             if self.bgmPlaying:
@@ -2550,11 +2554,17 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
             self.open()
             self._playVideo(resume and video.viewOffset.asInt() or 0, force_update=force_update, session_id=session_id)
         except Exception:
-            timing.finish(span)
+            try:
+                timing.finish(span)
+            except Exception:
+                util.DEBUG_LOG("Player: timing hook failed")
             self._pb_span = None
             raise
         finally:
-            timing.pause_span(span)
+            try:
+                timing.pause_span(span)
+            except Exception:
+                util.DEBUG_LOG("Player: timing hook failed")
 
     def getOSSPathHint(self, meta):
         # only hint the path one folder above for a movie, two folders above for TV
@@ -2587,13 +2597,19 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
             raise
         except:
             util.ERROR(notify=True)
-            timing.finish(getattr(self, "_pb_span", None))
+            try:
+                timing.finish(getattr(self, "_pb_span", None))
+            except Exception:
+                util.DEBUG_LOG("Player: timing hook failed")
             self._pb_span = None
             return
 
         meta = self.playerObject.metadata
         mode = "transcode" if getattr(meta, "isTranscoded", False) else "direct"
-        timing.play_phase(getattr(self, "_pb_span", None), "decision", mode=mode)
+        try:
+            timing.play_phase(getattr(self, "_pb_span", None), "decision", mode=mode)
+        except Exception:
+            util.DEBUG_LOG("Player: timing hook failed")
         url = meta.streamUrls[0]
 
         bifURL = self.playerObject.getBifUrl()
@@ -2676,7 +2692,10 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
             probOff = self.handler.getIntroOffset(offset, setSkipped=True)
             if probOff:
                 introOffset = probOff
-        timing.play_phase(getattr(self, "_pb_span", None), "markers")
+        try:
+            timing.play_phase(getattr(self, "_pb_span", None), "markers")
+        except Exception:
+            util.DEBUG_LOG("Player: timing hook failed")
 
         if meta.isTranscoded:
             self.handler.mode = self.handler.MODE_RELATIVE
@@ -2848,7 +2867,10 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
         self.trigger('starting.video')
         self.handler.queuingNext = False
         self.handler.queuingSpecific = False
-        timing.play_phase(getattr(self, "_pb_span", None), "stream_open")
+        try:
+            timing.play_phase(getattr(self, "_pb_span", None), "stream_open")
+        except Exception:
+            util.DEBUG_LOG("Player: timing hook failed")
         self.play(url, li)
 
     def playVideoPlaylist(self, playlist, resume=False, handler=None, session_id=None):
@@ -3032,12 +3054,17 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
             self._pendingStaleStop = False
         self.trigger('playback.started')
 
-        if not self.handler:
+        try:
             timing.play_phase(getattr(self, "_pb_span", None), "playing")
+        except Exception:
+            util.DEBUG_LOG("Player: timing hook failed")
+        if not self.handler:
             return
-        timing.play_phase(getattr(self, "_pb_span", None), "playing")
         self.handler.onPlayBackStarted()
-        timing.play_phase(getattr(self, "_pb_span", None), "subtitles")
+        try:
+            timing.play_phase(getattr(self, "_pb_span", None), "subtitles")
+        except Exception:
+            util.DEBUG_LOG("Player: timing hook failed")
 
     def onAVChange(self):
         if not self.sessionID:
@@ -3059,10 +3086,13 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
         self.isExternal = self.isExternalPlayer()
         self.trigger('av.started')
         self.started = True
-        span = getattr(self, "_pb_span", None)
-        timing.play_phase(span, "first_frame")
-        timing.mark(span, "first")
-        timing.finish(span)
+        try:
+            span = getattr(self, "_pb_span", None)
+            timing.play_phase(span, "first_frame")
+            timing.mark(span, "first")
+            timing.finish(span)
+        except Exception:
+            util.DEBUG_LOG("Player: timing hook failed")
         self._pb_span = None
         if not self.handler:
             return

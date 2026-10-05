@@ -576,8 +576,11 @@ _ART_PROPS = frozenset((
 def _watch_art(url):
     if not url:
         return
-    from lib import timing
-    timing.watch_art(url)
+    try:
+        from lib import timing
+        timing.watch_art(url)
+    except Exception:
+        util.DEBUG_LOG("timing hook failed")
 
 
 class ManagedListItem(object):

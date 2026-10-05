@@ -691,7 +691,10 @@ class PrePlayWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RatingsMixi
             self.checkIsWatchlisted(self.video)
 
         self.setInfo()
-        timing.current().mark("first")
+        try:
+            timing.current().mark("first")
+        except Exception:
+            util.DEBUG_LOG("timing hook failed")
         self.setBoolProperty("initialized", True)
         self.batch_simple([(self.fillRoles, None, None),
                            (self.fillReviews, None, None),

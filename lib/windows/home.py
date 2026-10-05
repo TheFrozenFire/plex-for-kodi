@@ -773,10 +773,16 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
 
         self.bottomItem = 0
         if self.serverRefresh():
-            span.mark("first")
+            try:
+                span.mark("first")
+            except Exception:
+                util.DEBUG_LOG("Home: timing hook failed")
             self.setFocusId(self.SECTION_LIST_ID)
         else:
-            span.mark("first")
+            try:
+                span.mark("first")
+            except Exception:
+                util.DEBUG_LOG("Home: timing hook failed")
 
         self.hookSignals()
         util.CRON.registerReceiver(self)
@@ -3811,9 +3817,15 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
 
     def _noteHubsTiming(self, final):
         span = getattr(self, "_hubs_span", None)
-        timing.mark(span, "first")
+        try:
+            timing.mark(span, "first")
+        except Exception:
+            util.DEBUG_LOG("Home: timing hook failed")
         if final:
-            timing.finish(span)
+            try:
+                timing.finish(span)
+            except Exception:
+                util.DEBUG_LOG("Home: timing hook failed")
             self._hubs_span = None
 
     def updateHubCallback(self, hub, items=None, reselect_pos=None):
@@ -3979,12 +3991,18 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             self.tasks += [PinnedTypeHubsTask().setup(s, self.sectionHubsCallback)
                            for s in sections if isinstance(s, PinnedTypeSection)
                            and not s.server.DEFER_HUBS]
-            timing.finish(getattr(self, "_hubs_span", None))
-            self._hubs_span = timing.begin("home.hubs") if self.tasks else None
+            try:
+                timing.finish(getattr(self, "_hubs_span", None))
+                self._hubs_span = timing.begin("home.hubs") if self.tasks else None
+            except Exception:
+                util.DEBUG_LOG("Home: timing hook failed")
             if self.tasks:
                 backgroundthread.BGThreader.addTasks(self.tasks)
             else:
-                timing.finish(self._hubs_span)
+                try:
+                    timing.finish(self._hubs_span)
+                except Exception:
+                    util.DEBUG_LOG("Home: timing hook failed")
                 self._hubs_span = None
 
         show_pm_indicator = util.getSetting('path_mapping_indicators')

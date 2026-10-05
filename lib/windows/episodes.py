@@ -526,7 +526,10 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         self.updateProperties()
         self.setBoolProperty("initialized", True)
         self.fillEpisodes(from_redirect=from_redirect)
-        timing.current().mark("first")
+        try:
+            timing.current().mark("first")
+        except Exception:
+            util.DEBUG_LOG("timing hook failed")
 
         # postpone less important tasks
         self.batch_simple([

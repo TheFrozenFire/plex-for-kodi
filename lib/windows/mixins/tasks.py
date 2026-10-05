@@ -35,7 +35,10 @@ class TasksMixin(object):
             task = SimpleTask().setup(func, self.default_callback, *(args or []), **(kwargs or {}))
             batch.append(task)
         if timing_span is not None:
-            timing_span.after_tasks(batch)
+            try:
+                timing_span.after_tasks(batch)
+            except Exception:
+                log.DEBUG_LOG("timing hook failed")
         backgroundthread.BGThreader.addTasks(batch)
 
     def default_callback(self, task):
