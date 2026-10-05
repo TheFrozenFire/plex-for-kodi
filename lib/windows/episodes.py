@@ -40,6 +40,32 @@ from .mixins.tasks import TasksMixin
 VIDEO_RELOAD_KW = dict(includeExtras=1, includeExtrasCount=10, includeChapters=1)
 
 
+def fast_season_paint():
+    """One metadata read paints a season. ``checkFiles`` stays on the play path."""
+    return util.getSetting("fast_season_paint", True)
+
+
+def show_for_season_open(show, episode, season):
+    """The show object for a season screen.
+
+    With ``fast_season_paint`` the show already in hand is used as-is. Otherwise
+    it is reloaded, which is a second metadata read before the window can draw.
+    """
+    fetched = show or (episode or season).show()
+    if fast_season_paint():
+        return fetched
+    return fetched.reload(includeExtras=1, includeExtrasCount=10, includeOnDeck=1)
+
+
+def metadata_reload_kwargs(**extra):
+    """Episode metadata for the list. File stats only when fast paint is off."""
+    kw = dict(extra)
+    kw.setdefault("includeChapters", 1)
+    if not fast_season_paint():
+        kw["checkFiles"] = 1
+    return kw
+
+
 class EpisodesReloadTask(backgroundthread.Task):
     def setup(self, episodes, callback, set_item_info=False):
         self.episodes = episodes
@@ -62,17 +88,17 @@ class EpisodesReloadTask(backgroundthread.Task):
         try:
             if epLen == 1:
                 ep, prog = self.episodes[0]
-                ep.reload(checkFiles=1, includeChapters=1, fromMediaChoice=ep.mediaChoice is not None)
+                ep.reload(fromMediaChoice=ep.mediaChoice is not None, **metadata_reload_kwargs())
             elif epLen > 1:
                 # fetch data for all episodes in one go
                 epMap = {str(ep.ratingKey): ep for ep, _ in self.episodes}
                 data = plexobjects.listItems(self.episodes[0][0].server, '/library/metadata/{0}'.format(",".join(list(e.ratingKey for e, _ in self.episodes))), return_data=True,
-                                             checkFiles=1, includeChapters=1, includeMarkers=1)
+                                             **metadata_reload_kwargs(includeMarkers=1))
                 rl_cnt = 0
                 for d in data:
                     ep = epMap.get(d.attrib.get("ratingKey"), None)
                     if ep:
-                        ep.reload(checkFiles=1, includeChapters=1, fromMediaChoice=ep.mediaChoice is not None, data=d)
+                        ep.reload(fromMediaChoice=ep.mediaChoice is not None, data=d, **metadata_reload_kwargs())
                         rl_cnt += 1
                 util.DEBUG_LOG("EpisodesReloadTask: Reloaded data for {}/{} items", rl_cnt, len(self.episodes))
             else:
@@ -299,8 +325,7 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         self.initialEpisode = episode
         self.season = season if season is not None else self.episode.season()
         try:
-            self.show_ = show or (self.episode or self.season).show().reload(includeExtras=1, includeExtrasCount=10,
-                                                                             includeOnDeck=1)
+            self.show_ = show_for_season_open(show, self.episode, self.season)
         except IndexError:
             raise util.NoDataException
 
@@ -511,7 +536,8 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         player.PLAYER.on('video.progress', self.onVideoProgress)
 
     def _setup(self, from_redirect=False):
-        (self.season or self.show_).reload(checkFiles=1, **VIDEO_RELOAD_KW)
+        if not fast_season_paint():
+            (self.season or self.show_).reload(checkFiles=1, **VIDEO_RELOAD_KW)
 
         if not self.episodesPaginator:
             self.episodesPaginator = EpisodesPaginator(self.episodeListControl,
@@ -1609,7 +1635,8 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         tasks = []
         cur_mli = self.episodeListControl.getSelectedItem()
 
-        if cur_mli and cur_mli.dataSource:
+        fast = fast_season_paint()
+        if cur_mli and cur_mli.dataSource and not fast:
             # handle our currently selected episode first, synchronously, then use background tasks to load the remaining
             # episode's details
             item_progress = with_progress
@@ -1617,7 +1644,8 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
                 item_progress = False if cur_mli.dataSource.ratingKey in skip_progress_for else with_progress
 
             try:
-                cur_mli.dataSource.reload(checkFiles=1, includeChapters=1, fromMediaChoice=cur_mli.dataSource.mediaChoice is not None)
+                cur_mli.dataSource.reload(fromMediaChoice=cur_mli.dataSource.mediaChoice is not None,
+                                          **metadata_reload_kwargs())
                 util.DEBUG_LOG("Episodes: Sync-loading currently selected item: {}", cur_mli.dataSource)
                 self._reloadItem(cur_mli, with_progress=item_progress, set_item_info=set_item_info)
             except:
@@ -1625,6 +1653,12 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
                 self.doClose()
                 return
             util.DEBUG_LOG("Episodes: Currently selected item loaded")
+            self.currentItemLoaded = True
+            self.lastItem = cur_mli
+            self.setBoolProperty('current_item.loaded', True)
+        elif cur_mli and cur_mli.dataSource:
+            # The children page already painted this row. Its chapter and stream
+            # detail loads with the rest of the page, off the UI thread.
             self.currentItemLoaded = True
             self.lastItem = cur_mli
             self.setBoolProperty('current_item.loaded', True)
@@ -1639,7 +1673,7 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
             if not mli.dataSource:
                 continue
 
-            if mli == cur_mli:
+            if not fast and mli == cur_mli:
                 continue
 
             item_progress = with_progress
@@ -1699,6 +1733,12 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         idx = 0
 
         seasonOrShow = self.season or self.show_
+
+        if fast_season_paint() and seasonOrShow is not None and not seasonOrShow.extras:
+            try:
+                seasonOrShow.reload(**VIDEO_RELOAD_KW)
+            except Exception:
+                util.ERROR("Episodes: extras reload failed")
 
         if not seasonOrShow.extras:
             self.extraListControl.reset()

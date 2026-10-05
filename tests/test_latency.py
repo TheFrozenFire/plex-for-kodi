@@ -4,7 +4,10 @@ from __future__ import absolute_import
 
 from kodienv import ENV
 
-from lib.windows import pagination
+# Importing the episode window imports the player, which starts a monitor thread.
+ENV.abort_requested = True
+
+from lib.windows import episodes, pagination
 
 from .base import KodiTestCase
 
@@ -73,3 +76,37 @@ class RelatedCountTest(KodiTestCase):
         hub.paginate()
         self.assertEqual(hub.asked, [(0, hub.initialPageSize)])
         self.assertEqual(hub.leafCount, 20)
+
+
+class SeasonPaintTest(KodiTestCase):
+    def test_show_already_in_hand_is_not_reloaded(self):
+        show = object()
+        self.assertIs(episodes.show_for_season_open(show, None, None), show)
+        self.assertNotIn("checkFiles", episodes.metadata_reload_kwargs())
+
+    def test_missing_show_is_fetched_once(self):
+        fetched = object()
+
+        class Season(object):
+            calls = 0
+
+            def show(self):
+                Season.calls += 1
+                return fetched
+
+        self.assertIs(episodes.show_for_season_open(None, None, Season()), fetched)
+        self.assertEqual(Season.calls, 1)
+
+    def test_setting_off_reloads_and_stats_files(self):
+        ENV.settings["fast_season_paint"] = "false"
+
+        class Show(object):
+            def reload(self, **kwargs):
+                self.kwargs = kwargs
+                return "reloaded"
+
+        show = Show()
+        self.assertEqual(episodes.show_for_season_open(show, None, None), "reloaded")
+        self.assertEqual(show.kwargs["includeOnDeck"], 1)
+        self.assertEqual(episodes.metadata_reload_kwargs()["checkFiles"], 1)
+        self.assertEqual(episodes.metadata_reload_kwargs()["includeChapters"], 1)

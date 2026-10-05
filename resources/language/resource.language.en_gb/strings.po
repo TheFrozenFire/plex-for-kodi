@@ -3372,3 +3372,11 @@ msgstr ""
 msgctxt "#35053"
 msgid "Do not ask the server how many related items exist before the show, season, or detail screen is drawn. The count comes from the related page itself, after the screen is up. Turn this off to restore the count-only request."
 msgstr ""
+
+msgctxt "#35054"
+msgid "Paint a season from one metadata read"
+msgstr ""
+
+msgctxt "#35055"
+msgid "Draw the episode list from the episode page already being fetched. Do not reload the show, the season, and the focused episode before the list is usable, and do not ask the server to stat files until playback. Turn this off to restore those reloads."
+msgstr ""

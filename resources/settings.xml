@@ -31,6 +31,11 @@
                     <default>true</default>
                     <control type="toggle"/>
                 </setting>
+                <setting id="fast_season_paint" type="boolean" label="35054" help="35055">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle"/>
+                </setting>
                 <setting id="kiosk.always" type="boolean" label="33735" help="33736">
                     <level>0</level>
                     <default>true</default>
