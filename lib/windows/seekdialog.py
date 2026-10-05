@@ -2702,6 +2702,14 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
                 self.pausedAt = None
                 return
 
+            # Seek callbacks report the requested target; keyframe playback may
+            # land earlier. Refresh before marker selection and countdown updates.
+            try:
+                self.offset = offset or int(self.handler.player.getTime() * 1000)
+            except RuntimeError:  # Playback has stopped
+                self.resetSeeking()
+                return
+
             if self.player.playState == self.player.STATE_PLAYING:
                 self.idleTime = None
 
@@ -2733,11 +2741,8 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
                         self.hideOSD()
 
         if offset or self.initialized:
-            try:
-                self.offset = offset or int(self.handler.player.getTime() * 1000)
-            except RuntimeError:  # Playback has stopped
-                self.resetSeeking()
-                return
+            if not self.initialized:
+                self.offset = offset
 
             if offset or (self.autoSeekTimeout and time.time() >= self.autoSeekTimeout and
                           self.offset != self.selectedOffset):

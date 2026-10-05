@@ -3267,6 +3267,7 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
 
     def _videoMonitor(self):
         hasFullScreened = False
+        fullscreenPlaybackID = None
 
         ct = 0
         util.DEBUG_LOG("VideoMonitor: Initializing...")
@@ -3293,6 +3294,9 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
                         util.MONITOR.waitForAbort(0.1)
 
             util.MONITOR.waitForAbort(0.1)
+            if util.MONITOR.abortRequested() or self._closed:
+                break
+
             if xbmc.getCondVisibility('Window.IsActive(videoosd)'):
                 if not self.hasOSD:
                     self.hasOSD = True
@@ -3308,8 +3312,12 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
                 self.hasSeekOSD = False
 
             if xbmc.getCondVisibility('VideoPlayer.IsFullscreen'):
-                if not hasFullScreened:
+                # Queue/readiness waits and the busy dialog can hide the native
+                # close/reopen between items, including when the handler is reused.
+                playbackID = self.handler.playbackID
+                if not hasFullScreened or fullscreenPlaybackID != playbackID:
                     hasFullScreened = True
+                    fullscreenPlaybackID = playbackID
                     self.onVideoWindowOpened()
             elif hasFullScreened and not xbmc.getCondVisibility('Window.IsVisible(busydialog)'):
                 hasFullScreened = False
