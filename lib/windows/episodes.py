@@ -519,7 +519,8 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
                                                        parent_window=self)
 
         if not self.relatedPaginator:
-            self.relatedPaginator = RelatedPaginator(self.relatedListControl, leaf_count=int(self.show_.relatedCount),
+            self.relatedPaginator = RelatedPaginator(self.relatedListControl,
+                                                     leaf_count=pagination.related_leaf_count(self.show_),
                                                      parent_window=self)
 
         self.watchlist_setup(self.show_)

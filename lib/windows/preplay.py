@@ -680,7 +680,8 @@ class PrePlayWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RatingsMixi
             self.video.related_source = "more-from-credits"
         self.video.reload(checkFiles=1, **VIDEO_RELOAD_KW)
         try:
-            self.relatedPaginator = RelatedPaginator(self.relatedListControl, leaf_count=int(self.video.relatedCount),
+            self.relatedPaginator = RelatedPaginator(self.relatedListControl,
+                                                     leaf_count=pagination.related_leaf_count(self.video),
                                                      parent_window=self)
         except ValueError:
             raise util.NoDataException

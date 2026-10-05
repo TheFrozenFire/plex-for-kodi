@@ -3364,3 +3364,11 @@ msgstr ""
 msgctxt "#35051"
 msgid "Developer switch, hidden from the settings screen. Logs how long each Plex HTTP request took. PM4K_TIMING=1 does the same thing."
 msgstr ""
+
+msgctxt "#35052"
+msgid "Defer related-item counts"
+msgstr ""
+
+msgctxt "#35053"
+msgid "Do not ask the server how many related items exist before the show, season, or detail screen is drawn. The count comes from the related page itself, after the screen is up. Turn this off to restore the count-only request."
+msgstr ""

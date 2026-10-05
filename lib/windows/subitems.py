@@ -129,7 +129,7 @@ class ShowWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMixin, 
             # fixme, multiple? choice?
             self.mediaItem.related_source = "more-from-credits"
         self.mediaItem.reload(includeExtras=1, includeExtrasCount=10, includeOnDeck=1)
-        self.relatedPaginator = RelatedPaginator(self.relatedListControl, leaf_count=int(self.mediaItem.relatedCount),
+        self.relatedPaginator = RelatedPaginator(self.relatedListControl, leaf_count=pagination.related_leaf_count(self.mediaItem),
                                                  parent_window=self)
 
         self.watchlist_setup(self.mediaItem)
@@ -734,7 +734,7 @@ class ArtistWindow(ShowWindow):
         self.setFocusId(self.PLAY_BUTTON_ID)
 
     def setup(self):
-        self.relatedPaginator = RelatedPaginator(self.relatedListControl, leaf_count=int(self.mediaItem.relatedCount),
+        self.relatedPaginator = RelatedPaginator(self.relatedListControl, leaf_count=pagination.related_leaf_count(self.mediaItem),
                                                  parent_window=self)
         self.updateProperties()
         self.fill()

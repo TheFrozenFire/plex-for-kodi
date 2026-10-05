@@ -26,6 +26,11 @@
                     <visible>false</visible>
                     <control type="toggle"/>
                 </setting>
+                <setting id="defer_related_count" type="boolean" label="35052" help="35053">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle"/>
+                </setting>
                 <setting id="kiosk.always" type="boolean" label="33735" help="33736">
                     <level>0</level>
                     <default>true</default>
