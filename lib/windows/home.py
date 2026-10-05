@@ -3890,10 +3890,18 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                 or ("/library/sections/watchlist" in self.librarySettings and self.librarySettings["/library/sections/watchlist"].get("show", True))):
             # get watchlist
             from plexnet import plexlibrary
-            wl = watchlist_section = plexlibrary.WatchlistSection(None, server=plexapp.SERVERMANAGER.getDiscoverServer())
-            if wl.has_data():
-                wl.title = T(34000, 'Watchlist')
-                sections.append(wl)
+            try:
+                wl = plexlibrary.WatchlistSection(None, server=plexapp.SERVERMANAGER.getDiscoverServer())
+            except plexnet.exceptions.RateLimited as error:
+                util.LOG('Watchlist temporarily unavailable: {}', error)
+                if not error.from_cooldown:
+                    util.showNotification(T(35050, 'Plex is temporarily limiting Watchlist requests. Try again in {} seconds.').format(error.retry_after),
+                                          header=T(34000, 'Watchlist'))
+            else:
+                watchlist_section = wl
+                if wl.has_data():
+                    wl.title = T(34000, 'Watchlist')
+                    sections.append(wl)
 
         if "playlists" not in self.librarySettings \
                 or ("playlists" in self.librarySettings and self.librarySettings["playlists"].get("show", True)):
