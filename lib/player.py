@@ -2532,13 +2532,32 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
             self.BGMTask = BGMPlayerTask().setup(source, self, volume, *args, **kwargs)
             backgroundthread.BGThreader.addTask(self.BGMTask)
 
-    def playVideo(self, video, resume=False, force_update=False, session_id=None, handler=None):
+    def _beginPlaybackTiming(self):
         try:
             span = timing.begin("playback.start")
+            timing.note_playback(span)
         except Exception:
             util.DEBUG_LOG("Player: timing hook failed")
             span = None
         self._pb_span = span
+        return span
+
+    def _failPlaybackTiming(self, span):
+        try:
+            timing.finish(span)
+        except Exception:
+            util.DEBUG_LOG("Player: timing hook failed")
+        self._pb_span = None
+
+    def _pausePlaybackTiming(self, span):
+        """Drop the span from this thread. It stays open until the first frame."""
+        try:
+            timing.pause_span(span)
+        except Exception:
+            util.DEBUG_LOG("Player: timing hook failed")
+
+    def playVideo(self, video, resume=False, force_update=False, session_id=None, handler=None):
+        span = self._beginPlaybackTiming()
         try:
             if self.bgmPlaying:
                 self.stopAndWait()
@@ -2554,17 +2573,10 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
             self.open()
             self._playVideo(resume and video.viewOffset.asInt() or 0, force_update=force_update, session_id=session_id)
         except Exception:
-            try:
-                timing.finish(span)
-            except Exception:
-                util.DEBUG_LOG("Player: timing hook failed")
-            self._pb_span = None
+            self._failPlaybackTiming(span)
             raise
         finally:
-            try:
-                timing.pause_span(span)
-            except Exception:
-                util.DEBUG_LOG("Player: timing hook failed")
+            self._pausePlaybackTiming(span)
 
     def getOSSPathHint(self, meta):
         # only hint the path one folder above for a movie, two folders above for TV
@@ -2874,6 +2886,17 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
         self.play(url, li)
 
     def playVideoPlaylist(self, playlist, resume=False, handler=None, session_id=None):
+        # Season playback with more than one episode comes through here, not playVideo.
+        span = self._beginPlaybackTiming()
+        try:
+            self._playVideoPlaylist(playlist, resume=resume, handler=handler, session_id=session_id)
+        except Exception:
+            self._failPlaybackTiming(span)
+            raise
+        finally:
+            self._pausePlaybackTiming(span)
+
+    def _playVideoPlaylist(self, playlist, resume=False, handler=None, session_id=None):
         if self.bgmPlaying:
             self.stopAndWait()
 

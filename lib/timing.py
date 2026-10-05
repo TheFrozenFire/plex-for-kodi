@@ -41,6 +41,9 @@ _QUERY_SECRET = re.compile(
     re.IGNORECASE,
 )
 _DIGITS = re.compile(r"/\d+")
+# Plex catalog ids are often hex and start with a digit. A digits-only
+# replacement would leave the rest of the id in the log ("{id}abc...").
+_HEX_ID = re.compile(r"/[0-9a-fA-F]{8,}")
 _UUID = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
@@ -56,6 +59,11 @@ _cached = None
 _span_ids = None
 _span_lock = threading.Lock()
 _ctx = contextvars.ContextVar("pm4k_timing_stack", default=())
+
+# The playback span stays attributable after the UI thread pauses it, until
+# the first frame finishes it. Requests on other threads (decision, timeline)
+# would otherwise log span=-.
+_playback_span = None
 
 _art_lock = threading.Lock()
 _art_pending = []
@@ -80,8 +88,9 @@ _NULL = _NullSpan()
 
 def reset():
     """Forget cached state. Tests use this."""
-    global _cached, _span_ids, _art_thread, _art_probe
+    global _cached, _span_ids, _art_thread, _art_probe, _playback_span
     _cached = None
+    _playback_span = None
     with _span_lock:
         _span_ids = 0
     try:
@@ -118,6 +127,7 @@ def redact_endpoint(url):
     else:
         label = ""
     path = _UUID.sub("{id}", parts.path or "/")
+    path = _HEX_ID.sub("/{id}", path)
     path = _DIGITS.sub("/{id}", path)
     query = []
     for key, value in parse_qsl(parts.query, keep_blank_values=True):
@@ -317,9 +327,36 @@ def mark(span, phase="first"):
         _log_hook_failure("mark", exc)
 
 
+def note_playback(span):
+    """Attribute later requests to ``span`` until :func:`finish`, even on other threads."""
+    global _playback_span
+    try:
+        if getattr(span, "real", False):
+            _playback_span = span
+    except Exception as exc:
+        _log_hook_failure("note_playback", exc)
+
+
+def _request_span():
+    """The span a request line should name. Playback outlives the UI-thread stack."""
+    try:
+        opened = current()
+        if getattr(opened, "real", False):
+            return opened
+        playback = _playback_span
+        if getattr(playback, "real", False) and not playback._finished:
+            return playback
+    except Exception as exc:
+        _log_hook_failure("current", exc)
+    return _NULL
+
+
 def finish(span):
     """Close ``span``. If it is waiting on tasks, ``phase=full`` is logged when they finish."""
+    global _playback_span
     try:
+        if span is _playback_span:
+            _playback_span = None
         if not getattr(span, "real", False):
             return
         span._drop_from_thread()
@@ -518,7 +555,7 @@ def observe_http(method, url, func):
 
 def _log_http(method, url, response, started):
     total_ms = _ms(started)
-    active = current()
+    active = _request_span()
     span_id = active.id if getattr(active, "real", False) else "-"
     if response is None:
         status = 0

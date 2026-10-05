@@ -184,7 +184,7 @@ Link RTT is measured separately. Timing is off unless you turn it on, and every 
 
 Then walk the slow paths once: cold start until the home rows are up, open a show, open a season, open a movie or episode detail, start playback and wait for the picture, stop, go back to the previous screen, open a library and scroll until the next page of posters loads. Quit Kodi (or turn timing off) so the art watcher flushes.
 
-Grep the Kodi log for `TIMING`. Hosts other than `*.plex.tv` are logged as `{server}`. Numeric ids and token query values are redacted in every field, including `thread` (a request thread can be named with the full URL). A hook that fails is logged and swallowed so it cannot break drawing or playback. Summarize the file from a checkout of this tree:
+Grep the Kodi log for `TIMING`. Hosts other than `*.plex.tv` are logged as `{server}`. Numeric ids, hex catalog ids, and token query values are redacted in every field, including `thread` (a request thread can be named with the full URL). A hook that fails is logged and swallowed so it cannot break drawing or playback. `playback.start` covers both a single item and a playlist (a season with more than one episode). It stays the current span for requests on other threads until the first frame. Summarize the file from a checkout of this tree:
 
 ```sh
 python3 tools/parse_timings.py /path/to/kodi.log

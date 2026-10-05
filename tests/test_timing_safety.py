@@ -171,6 +171,12 @@ def _call_sites():
         with timing.span("open.season"):
             timing.note_task(_Task())
 
+    def use_note_playback():
+        opened = timing.begin("playback.start")
+        timing.note_playback(opened)
+        timing.note_playback(None)
+        timing.finish(opened)
+
     def use_http():
         timing.observe_http("GET", "http://pms.example/library/sections", lambda: _Response())
 
@@ -187,6 +193,7 @@ def _call_sites():
         "adopt": use_adopt,
         "release_task": use_release,
         "note_task": use_note,
+        "note_playback": use_note_playback,
         "observe_http": use_http,
     }
 
@@ -317,3 +324,77 @@ class TimingSafetyTest(KodiTestCase):
         self.assertEqual(fake.handler.av_started, 1)
         self.assertIsNone(fake._pb_span)
         self.assertFalse(ENV.logged("sekret-hook"))
+
+    def test_playlist_playback_span_attributes_other_threads(self):
+        os.environ["PM4K_TIMING"] = "1"
+        timing.reset()
+        real_open = player.PlexPlayer.open
+        real_play = player.PlexPlayer._playVideo
+        player.PlexPlayer.open = lambda self: None
+        player.PlexPlayer._playVideo = lambda *args, **kwargs: None
+        try:
+            fake = object.__new__(player.PlexPlayer)
+            fake.sessionID = "session"
+            fake.handler = _Handler()
+            fake._pb_span = None
+            fake.pauseAfterPlaybackStarted = False
+            fake._pendingStaleStop = False
+            fake.bgmPlaying = False
+            fake.trigger = lambda *args, **kwargs: None
+            fake.isPlayingVideo = lambda: True
+            fake.isExternalPlayer = lambda: False
+
+            class Offset(object):
+                def asInt(self):
+                    return 0
+
+            class Video(object):
+                viewOffset = Offset()
+
+                def softReload(self, *args, **kwargs):
+                    return None
+
+            class Playlist(object):
+                isRemote = False
+
+                def current(self):
+                    return Video()
+
+            player.PlexPlayer.playVideoPlaylist(fake, Playlist(), resume=False)
+        finally:
+            player.PlexPlayer.open = real_open
+            player.PlexPlayer._playVideo = real_play
+
+        self.assertTrue(ENV.logged("name=playback.start phase=begin"))
+        span = fake._pb_span
+        self.assertTrue(getattr(span, "real", False))
+
+        url = "https://pms.example:32400/video/:/transcode/universal/decision?X-Plex-Token=sekret-playback"
+
+        def on_thread():
+            timing.observe_http("GET", url, lambda: _Response())
+
+        worker = threading.Thread(target=on_thread, name="HTTP-ASYNC:{0}".format(url))
+        worker.start()
+        worker.join(timeout=2)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(ENV.logged("span={0}".format(span.id)))
+        self.assertFalse(ENV.logged("sekret-playback"))
+        self.assertFalse(ENV.logged("pms.example"))
+
+        fake.handler = _Handler()
+        player.PlexPlayer.onPlayBackStarted(fake)
+        player.PlexPlayer.onAVStarted(fake)
+        self.assertTrue(ENV.logged("phase=playing"))
+        self.assertTrue(ENV.logged("phase=first_frame"))
+        self.assertTrue(ENV.logged("name=playback.start phase=first"))
+        self.assertTrue(ENV.logged("name=playback.start phase=full"))
+        self.assertIsNone(fake._pb_span)
+        self.assertEqual(fake.handler.av_started, 1)
+        self.assertEqual(fake.handler.playback_started, 1)
+
+        timing.observe_http("GET", "http://pms.example/library/sections", lambda: _Response())
+        lines = [message for message, _level in ENV.log_lines if "library/sections" in message]
+        self.assertTrue(lines)
+        self.assertTrue(all("span=-" in message or "span={0}".format(span.id) not in message for message in lines))
+        self.assertTrue(any("span=-" in message for message in lines))

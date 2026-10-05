@@ -106,6 +106,15 @@ class TimingHelperTest(KodiTestCase):
         self.assertFalse(ENV.logged("pms.example"))
         self.assertFalse(ENV.logged("4242"))
 
+    def test_hex_catalog_id_is_fully_redacted(self):
+        endpoint = timing.redact_endpoint(
+            "https://discover.provider.plex.tv/library/metadata/1abc2345def67890abcd1234"
+        )
+        self.assertEqual(endpoint, "discover.provider.plex.tv/library/metadata/{id}")
+        self.assertNotIn("1abc2345", endpoint)
+        self.assertNotIn("abc2345", endpoint)
+        self.assertNotIn("abcd1234", endpoint)
+
     def test_request_cache_hit_and_span_id(self):
         os.environ["PM4K_TIMING"] = "1"
 
