@@ -8,6 +8,8 @@ from kodienv import ENV
 ENV.abort_requested = True
 
 from lib.windows import episodes, pagination
+from plexnet import plexconnection
+from plexnet import util as pnutil
 
 from .base import KodiTestCase
 
@@ -110,3 +112,53 @@ class SeasonPaintTest(KodiTestCase):
         self.assertEqual(show.kwargs["includeOnDeck"], 1)
         self.assertEqual(episodes.metadata_reload_kwargs()["checkFiles"], 1)
         self.assertEqual(episodes.metadata_reload_kwargs()["includeChapters"], 1)
+
+
+class _Pref(object):
+    def __init__(self, skip):
+        self.skip = skip
+
+    def getPreference(self, pref, default=None, **kwargs):
+        if pref == "skip_dead_connections":
+            return self.skip
+        return default
+
+    def DEBUG_LOG(self, *args, **kwargs):
+        return None
+
+    def LOG(self, *args, **kwargs):
+        return None
+
+
+class ReachabilityTest(KodiTestCase):
+    def setUp(self):
+        super(ReachabilityTest, self).setUp()
+        self._interface = pnutil.INTERFACE
+
+    def tearDown(self):
+        pnutil.INTERFACE = self._interface
+        super(ReachabilityTest, self).tearDown()
+
+    def _connection(self):
+        # Documentation range. Not an address from any real setup.
+        return plexconnection.PlexConnection(1, "http://203.0.113.10:32400", False, "token")
+
+    def test_known_unreachable_is_not_probed(self):
+        pnutil.INTERFACE = _Pref(True)
+        conn = self._connection()
+        conn.state = conn.STATE_UNREACHABLE
+        self.assertFalse(conn.testReachability(server=None))
+        self.assertFalse(conn.hasPendingRequest)
+
+    def test_unknown_address_is_still_tested(self):
+        pnutil.INTERFACE = _Pref(True)
+        conn = self._connection()
+        with self.assertRaises(AttributeError):
+            conn.testReachability(server=None)
+
+    def test_setting_off_retests_an_unreachable_address(self):
+        pnutil.INTERFACE = _Pref(False)
+        conn = self._connection()
+        conn.state = conn.STATE_UNREACHABLE
+        with self.assertRaises(AttributeError):
+            conn.testReachability(server=None)

@@ -3380,3 +3380,11 @@ msgstr ""
 msgctxt "#35055"
 msgid "Draw the episode list from the episode page already being fetched. Do not reload the show, the season, and the focused episode before the list is usable, and do not ask the server to stat files until playback. Turn this off to restore those reloads."
 msgstr ""
+
+msgctxt "#35056"
+msgid "Skip connections that already failed"
+msgstr ""
+
+msgctxt "#35057"
+msgid "Do not probe an address that has already failed a reachability check. A new server list is tested again. Turn this off to probe every address every time."
+msgstr ""

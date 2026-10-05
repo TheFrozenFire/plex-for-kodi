@@ -36,6 +36,11 @@
                     <default>true</default>
                     <control type="toggle"/>
                 </setting>
+                <setting id="skip_dead_connections" type="boolean" label="35056" help="35057">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle"/>
+                </setting>
                 <setting id="kiosk.always" type="boolean" label="33735" help="33736">
                     <level>0</level>
                     <default>true</default>

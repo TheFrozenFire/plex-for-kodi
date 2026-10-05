@@ -243,7 +243,7 @@ What that link feels like, with the connection already open: home is a few secon
 4. **Prefetch detail and children for what is already on screen.** When the home rows are painted, store the metadata those posters need (the show or movie, its seasons, and the first episode page) in the cache from step 1. Also prefetch the focused item's next click, and cancel it when focus moves. The click then paints from cache. Art for those URLs is warmed by setting the image URL early enough that Kodi fetches it before the click. Do not build a second image store.
 5. **Keep the PMS connection warm.** After idle, the next click should not pay a fresh handshake. One shared session per origin, and a cheap touch of the open connection before the user acts. `HttpRequest` must stop building a new session for the decision and for timelines, or those calls pay for a new connection every time.
 6. **Prefetch posters for the next chunk.** When a library or hub page is shown, set the transcode URLs for the next off-screen page so the texture cache is warm before the scroll. Ask for the cell size the UI uses, not the original file.
-7. **Skip connections that do not answer.** Remember an address that failed reachability and do not probe it again on the way to the UI. A dead address otherwise waits out `conn_check_timeout` (default 2.5 s) before startup moves on.
+7. **Skip connections that do not answer.** Done, behind `skip_dead_connections` (default on). An address already marked unreachable is not probed again, so it does not wait out the reachability timeout. A new connection object (a changed server list) starts unknown and is tested. Turn the setting off to probe every address every time.
 8. **A wider mirror only if the crawl says so.** If `tools/crawl_feasibility.py --scope full` is a modest number of requests and bytes, extend step 4 from visible rows to the libraries those rows came from, using `updatedAt` and the notifications socket. If the crawl is large, stop at the steps above.
 
 More workers are not a step. Overlapping the few hub requests that already run together helps. Adding many more in-flight calls barely shortens that same set. Delete serial calls first.
@@ -280,7 +280,7 @@ Invalidation, narrower than today:
 ### What to stop requesting
 
 - Memoize `PlexServer.library` and `Library.sections()` for the `nav` TTL. `showSections` should be one sections request, not `/library/` plus `/library/sections`.
-- Drop the size-0 `similar` request. `relatedCount` can use the `totalSize` of the same page `fillRelated` is about to fetch, or `includeRelatedCount` on the metadata reload if the server already returns it there.
+- The size-0 `similar` request is no longer on the paint path (`defer_related_count`, default on). The related hub uses `totalSize` from the page it fetches.
 - `EpisodesPaginator.initialPage`: one request with `X-Plex-Container-Start` set from the episode index, not a doubling loop of ever-larger pages.
 - `checkFiles=1` only when starting playback or when a path-mapping check needs the file, not on every detail open.
 - `includeMarkers=1` only on the continue-watching hub, not on every `/hubs` response.
@@ -306,13 +306,13 @@ Cancel the prefetch when focus moves (`Task.cancel` already exists). Cap prefetc
 
 - `showSections` steps 4–7 become one worker batch. The home `SectionHubsTask` is queued **first**, before the function waits, so `/hubs` overlaps `/library/sections` instead of following it.
 - Inside `PlexServer.hubs`, `/hubs` and `/hubs/continueWatching` run together, not sequentially.
-- `ShowWindow.setup` and `PrePlayWindow.setup` should not call `relatedCount` on the GUI thread before `batch_simple`. One metadata reload, then everything else on the pool.
+- `ShowWindow.setup` and `PrePlayWindow.setup` no longer call `relatedCount` on the GUI thread (`defer_related_count`, default on). The season screen's extra reloads are also off that path (`fast_season_paint`, default on).
 - The worker cap of 3 is about the GIL, but these tasks block on sockets. Overlapping the requests that are already in flight is enough. Raising the pool much further does not pay for itself on a ~170 ms RTT link; the serial chains above dominate. Do not raise it by flipping `ENABLE_HIGH_CONCURRENCY` globally; that comment is about CPU-bound work.
 
 ### Connections
 
 - One `Session` per origin (PMS active connection, plex.tv, discover), shared by `PlexServer.query` and `HttpRequest`. The decision and the timeline then ride the connection `query` already warmed. After the connection has gone idle, touch it before the next click so that click does not pay for a new handshake.
-- Do not probe an address that has already failed reachability. Remember it and skip it until the server list changes. A dead address waits out the reachability timeout on the way to the first paint.
+- An address that has already failed reachability is not probed again (`skip_dead_connections`, default on). A new connection object, from a changed server list, starts unknown and is tested. Turn the setting off to probe every address every time.
 - Replace the 10 ms `sleep` in `_connect` with `select`/`poll` on the socket. Correctness stays (the connect is still non-blocking and cancellable); new connections lose the extra tick.
 - Keep the transcode host stable (same IP the python client uses, not a plex.direct name Kodi cannot resolve) so Kodi's own curl pool can reuse connections too. The advancedsettings mapping already exists for this; image URLs should prefer that mapped address.
 
