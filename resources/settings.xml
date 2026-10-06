@@ -41,6 +41,11 @@
                     <default>true</default>
                     <control type="toggle"/>
                 </setting>
+                <setting id="prefetch_art" type="boolean" label="35058" help="35059">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle"/>
+                </setting>
                 <setting id="kiosk.always" type="boolean" label="33735" help="33736">
                     <level>0</level>
                     <default>true</default>

@@ -7,6 +7,10 @@ from kodienv import ENV
 # Importing the episode window imports the player, which starts a monitor thread.
 ENV.abort_requested = True
 
+import os
+import tempfile
+
+from lib import artprefetch, timing
 from lib.windows import episodes, pagination
 from plexnet import plexconnection
 from plexnet import util as pnutil
@@ -162,3 +166,38 @@ class ReachabilityTest(KodiTestCase):
         conn.state = conn.STATE_UNREACHABLE
         with self.assertRaises(AttributeError):
             conn.testReachability(server=None)
+
+
+class ArtPrefetchTest(KodiTestCase):
+    def test_cache_name_does_not_contain_the_url(self):
+        root = tempfile.mkdtemp()
+        os.environ["PM4K_ART_CACHE"] = root
+        try:
+            url = "https://pms.example:32400/photo/:/transcode?width=244&X-Plex-Token=sekret-art"
+            path = artprefetch.path_for(url)
+            self.assertTrue(path.endswith(".img"))
+            self.assertNotIn("sekret-art", path)
+            self.assertNotIn("pms.example", path)
+            with open(path, "wb") as handle:
+                handle.write(b"img")
+            self.assertEqual(artprefetch.resolve(url), path)
+        finally:
+            os.environ.pop("PM4K_ART_CACHE", None)
+            artprefetch._reset_for_tests()
+
+    def test_disabled_prefetch_leaves_the_url_alone(self):
+        ENV.settings["prefetch_art"] = "false"
+        url = "https://pms.example/photo/:/transcode?width=10"
+        self.assertEqual(artprefetch.resolve(url), url)
+        artprefetch.prefetch([url])
+        self.assertTrue(artprefetch._queue.empty())
+
+    def test_thumb_lookup_uses_the_thumbnails_directory(self):
+        root = tempfile.mkdtemp()
+        os.makedirs(os.path.join(root, "c"))
+        cached = os.path.join(root, "c", "c0ffee.jpg")
+        with open(cached, "wb") as handle:
+            handle.write(b"x")
+        found = timing._thumb_candidates("c/c0ffee.jpg", root)
+        self.assertEqual(found[0], cached)
+        self.assertTrue(os.path.exists(found[0]))

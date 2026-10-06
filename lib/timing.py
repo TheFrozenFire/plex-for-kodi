@@ -773,6 +773,29 @@ def _textures_db_has(url):
         return None
 
 
+def _thumb_candidates(name, thumbnails_dir):
+    """Paths Kodi may have written for ``getCacheThumbName``'s return value.
+
+    The name is relative to ``special://thumbnails``, often ``a/ab12....jpg``.
+    Looking for it in the process working directory misses a cached image, and
+    the measurement then reports a timeout after 20s.
+    """
+    text = str(name).replace("\\", "/").lstrip("/")
+    if text.startswith("special://"):
+        translated = _translate_special(text)
+        return [translated] if translated else []
+    if not thumbnails_dir:
+        return []
+    candidates = [os.path.join(thumbnails_dir, text)]
+    if not text.endswith(".jpg") and not text.endswith(".png"):
+        folder = text[0] if text else ""
+        candidates.append(os.path.join(thumbnails_dir, folder, text + ".jpg"))
+        candidates.append(os.path.join(thumbnails_dir, folder, text + ".png"))
+        candidates.append(os.path.join(thumbnails_dir, text + ".jpg"))
+        candidates.append(os.path.join(thumbnails_dir, text + ".png"))
+    return candidates
+
+
 def _thumb_file_exists(url):
     try:
         from kodi_six import xbmc
@@ -781,13 +804,8 @@ def _thumb_file_exists(url):
         return None
     if not name:
         return None
-    candidates = [name]
-    if not str(name).endswith(".png") and not str(name).endswith(".jpg"):
-        candidates = [name + ".jpg", name + ".png"]
-    for candidate in candidates:
-        path = candidate
-        if str(path).startswith("special://"):
-            path = _translate_special(path)
+    root = _translate_special("special://thumbnails")
+    for path in _thumb_candidates(name, root):
         if path and os.path.exists(path):
             return True
     return False

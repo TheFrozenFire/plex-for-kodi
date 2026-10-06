@@ -590,8 +590,17 @@ class ManagedListItem(object):
     def __init__(self, label='', label2='', iconImage='', thumbnailImage='', path='', data_source=None,
                  properties=None):
         self._listItem = xbmcgui.ListItem(label, label2, path=path)
-        self._listItem.setArt({"thumb": thumbnailImage, "icon": iconImage})
-        _watch_art(thumbnailImage)
+        shown = thumbnailImage
+        try:
+            from lib import artprefetch
+            shown = artprefetch.resolve(thumbnailImage)
+        except Exception:
+            shown = thumbnailImage
+        self._listItem.setArt({"thumb": shown, "icon": iconImage})
+        # Watch the URL Kodi was given. A prefetched file is local, so it is
+        # not an HTTP image wait. Watching the remote URL instead would time
+        # out, because Kodi never requests it.
+        _watch_art(shown)
         self.dataSource = data_source
         self.properties = {}
         self.label = label

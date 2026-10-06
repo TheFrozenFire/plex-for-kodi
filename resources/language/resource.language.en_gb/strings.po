@@ -3388,3 +3388,11 @@ msgstr ""
 msgctxt "#35057"
 msgid "Do not probe an address that has already failed a reachability check. A new server list is tested again. Turn this off to probe every address every time."
 msgstr ""
+
+msgctxt "#35058"
+msgid "Prefetch posters and episode thumbnails"
+msgstr ""
+
+msgctxt "#35059"
+msgid "Download the next row of posters and the focused show's season and episode thumbnails, at the size the screen displays, on a few background threads. Turn this off to let Kodi fetch each image when it is shown."
+msgstr ""

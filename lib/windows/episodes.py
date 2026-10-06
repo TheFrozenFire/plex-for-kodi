@@ -554,6 +554,19 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         self.setBoolProperty("initialized", True)
         self.fillEpisodes(from_redirect=from_redirect)
         try:
+            from lib import artprefetch
+            paginator = self.episodesPaginator
+            if paginator is not None and paginator.leafCount:
+                artprefetch.prefetch_episodes(
+                    self.season or self.show_,
+                    self.THUMB_AR16X9_DIM[0],
+                    self.THUMB_AR16X9_DIM[1],
+                    offset=paginator.offset + (paginator._currentAmount or 0),
+                    limit=paginator.pageSize,
+                )
+        except Exception:
+            util.DEBUG_LOG("Episodes: art prefetch hook failed")
+        try:
             timing.current().mark("first")
         except Exception:
             util.DEBUG_LOG("timing hook failed")

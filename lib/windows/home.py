@@ -3626,6 +3626,13 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         if util.addonSettings.dynamicBackgrounds and is_valid_mli:
             self.updateBackgroundFrom(mli.dataSource)
 
+        if is_valid_mli and mli.dataSource:
+            try:
+                from lib import artprefetch
+                artprefetch.prefetch_focused(mli.dataSource)
+            except Exception:
+                util.DEBUG_LOG("Home: art prefetch hook failed")
+
         if not mli or not mli.getProperty('is.end') or mli.getProperty('is.updating') == '1':
             # round robining
             if mli and util.getSetting("hubs_round_robin"):
@@ -4621,6 +4628,18 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                 control.selectItem(end)
         else:
             control.replaceItems(items)
+
+        try:
+            from lib import artprefetch
+            # The first items are on screen; Kodi fetches those. The rest of the
+            # row is the next page, warmed here so a scroll does not wait on them.
+            upcoming = [mli for mli in items[8:] if getattr(mli, "thumbnailImage", None)]
+            artprefetch.prefetch(
+                [mli.thumbnailImage for mli in upcoming],
+                items=upcoming,
+            )
+        except Exception:
+            util.DEBUG_LOG("Home: art prefetch hook failed")
 
         # hub reselect logic after updating a hub
         if use_reselect_pos:
