@@ -53,6 +53,29 @@ if util.addonSettings.debugRequests:
     logger.setLevel(logging.DEBUG)
 
 
+def _shutdown_added_workers():
+    """Release art prefetch, playback prep, and the timing art watcher.
+
+    Also runs when Kodi sets abortRequested: the main loop leaves and this
+    finally runs, and each worker polls abortRequested on its own wait.
+    """
+    try:
+        from . import artprefetch
+        artprefetch.shutdown()
+    except Exception:
+        util.DEBUG_LOG("Main: art prefetch shutdown failed")
+    try:
+        from . import playbackprep
+        playbackprep.shutdown()
+    except Exception:
+        util.DEBUG_LOG("Main: playback prep shutdown failed")
+    try:
+        from . import timing
+        timing.shutdown()
+    except Exception:
+        util.DEBUG_LOG("Main: timing shutdown failed")
+
+
 def waitForThreads():
     util.DEBUG_LOG('Main: Checking for any remaining threads (current: {})'.format(threading.currentThread().name))
     started = time.time()
@@ -387,6 +410,10 @@ def _main():
     finally:
         try:
             util.DEBUG_LOG('Main: SHUTTING DOWN...')
+            # Stop workers this tree added before anything else waits on threads.
+            # Kodi 21 joins every Python thread after the script ends, including
+            # daemons, and a wait without a timeout cannot be interrupted.
+            _shutdown_added_workers()
             dcm.storeDataCache()
             dcm.deinit()
             plexapp.util.INTERFACE.shutdownCache()

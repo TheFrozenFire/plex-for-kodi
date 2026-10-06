@@ -22,13 +22,30 @@ _MAX_FILES = 300
 _MAX_BYTES = 80 * 1024 * 1024
 _DOWNLOAD_TIMEOUT = (5, 20)
 
+_STOP = object()
+_WAIT = 0.5
+
 _queue = queue.Queue()
 _seen = set()
 _seen_lock = threading.Lock()
 _started = False
+_stop = False
+_threads = []
 _start_lock = threading.Lock()
 _focus_token = None
 _focus_lock = threading.Lock()
+
+
+def _aborting():
+    try:
+        from lib import util
+        return bool(util.MONITOR.abortRequested())
+    except Exception:
+        return False
+
+
+def _stopping():
+    return _stop or _aborting()
 
 
 def enabled():
@@ -122,19 +139,46 @@ def prefetch_episodes(season_or_show, width, height, offset=0, limit=12):
 
 def _ensure_workers():
     global _started
+    if _stop:
+        return
     with _start_lock:
-        if _started:
+        if _stop:
+            return
+        alive = [thread for thread in _threads if thread.is_alive()]
+        _threads[:] = alive
+        if len(_threads) >= _WORKERS:
+            _started = True
             return
         _started = True
-        for index in range(_WORKERS):
+        while len(_threads) < _WORKERS:
+            index = len(_threads)
             thread = threading.Thread(target=_worker, name="pm4k-art-{0}".format(index), daemon=True)
             thread.start()
+            _threads.append(thread)
+
+
+def shutdown():
+    """Unblock the art workers and wait for them. Safe to call more than once."""
+    global _stop
+    _stop = True
+    with _start_lock:
+        threads = list(_threads)
+    for _thread in threads:
+        _queue.put(_STOP)
+    for thread in threads:
+        thread.join(timeout=2)
 
 
 def _worker():
-    while True:
-        url, extra = _queue.get()
+    while not _stopping():
         try:
+            item = _queue.get(timeout=_WAIT)
+        except queue.Empty:
+            continue
+        try:
+            if item is _STOP:
+                return
+            url, extra = item
             if url == "__focus__":
                 _run_focus(extra[0], extra[1])
             elif url == "__episodes__":
@@ -155,8 +199,12 @@ def _still_focused(token):
 
 def _run_focus(token, item):
     # Let a fast scroll settle before paying for a season list.
-    time.sleep(0.35)
-    if not _still_focused(token):
+    deadline = time.time() + 0.35
+    while time.time() < deadline:
+        if _stopping() or not _still_focused(token):
+            return
+        time.sleep(0.05)
+    if not _still_focused(token) or _stopping():
         return
     try:
         from lib import util
@@ -246,6 +294,8 @@ def _download(url, item):
         size = 0
         with open(temporary, "wb") as handle:
             for chunk in response.iter_content(64 * 1024):
+                if _stopping():
+                    return
                 if not chunk:
                     continue
                 handle.write(chunk)
@@ -299,14 +349,21 @@ def _trim():
 
 
 def _reset_for_tests():
-    global _started, _focus_token
+    global _started, _stop, _focus_token
+    shutdown()
+    _stop = False
+    _started = False
+    with _start_lock:
+        _threads[:] = []
     with _seen_lock:
         _seen.clear()
     with _focus_lock:
         _focus_token = None
-    # Drain without starting workers. Tests do not enqueue downloads.
     while True:
         try:
             _queue.get_nowait()
+            _queue.task_done()
         except queue.Empty:
+            break
+        except ValueError:
             break

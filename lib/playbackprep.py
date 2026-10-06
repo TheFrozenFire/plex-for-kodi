@@ -27,8 +27,22 @@ _LEASES = {}
 _RELEASED = set()
 _TTL = 20.0
 _DEBOUNCE = 0.35
+_WAIT = 0.5
 _HOLD_DEFAULT = 300
 _STOP_PATH = "/video/:/transcode/universal/stop?session={0}"
+_stop = False
+
+
+def _aborting():
+    try:
+        from lib import util
+        return bool(util.MONITOR.abortRequested())
+    except Exception:
+        return False
+
+
+def _stopping():
+    return _stop or _aborting()
 
 
 def enabled():
@@ -148,9 +162,24 @@ def _key(video, offset):
     return (str(getattr(video, "ratingKey", "") or ""), int(offset or 0))
 
 
+def shutdown():
+    """Unblock the prep worker and wait for it. Safe to call more than once."""
+    global _stop
+    _stop = True
+    _WAKE.set()
+    with _LOCK:
+        worker = _WORKER
+    if worker is not None:
+        worker.join(timeout=2)
+
+
 def _ensure_worker():
     global _WORKER
+    if _stop:
+        return
     with _LOCK:
+        if _stop:
+            return
         worker = _WORKER
         if worker is not None and worker.is_alive():
             return
@@ -167,17 +196,27 @@ def _mark_drop_locked(keep_key, reason):
 
 
 def _worker():
-    while True:
+    while not _stopping():
         timeout = _seconds_until_deadline()
-        signaled = _WAKE.wait(timeout)
+        slice_ = _WAIT if timeout is None else min(_WAIT, timeout)
+        signaled = _WAKE.wait(slice_)
+        if _stopping():
+            return
         if not signaled:
-            release_expired()
+            if timeout is not None and timeout <= _WAIT:
+                release_expired()
             continue
         _WAKE.clear()
+        if _stopping():
+            return
         flush_drops()
-        while _WAKE.wait(_DEBOUNCE):
+        while not _stopping() and _WAKE.wait(min(_WAIT, _DEBOUNCE)):
             _WAKE.clear()
+            if _stopping():
+                return
             flush_drops()
+        if _stopping():
+            return
         with _LOCK:
             pending = _PENDING
             gen = _GEN
@@ -341,7 +380,9 @@ def _log_cleanup(reason, session, skipped):
 
 
 def _reset_for_tests():
-    global _GEN, _PENDING, _PREP, _session_is_playing, _perform_stop
+    global _GEN, _PENDING, _PREP, _stop, _session_is_playing, _perform_stop
+    shutdown()
+    _stop = False
     with _LOCK:
         _GEN += 1
         _PENDING = None

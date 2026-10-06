@@ -732,23 +732,43 @@ def _emit_art(item, cache, elapsed):
         redact_text(item["span"]), redact_text(cache), elapsed, redact_text(redact_endpoint(item["url"]))))
 
 
+def shutdown():
+    """Unblock the artwork watcher and wait for it. Safe to call more than once."""
+    _art_stop.set()
+    with _art_lock:
+        thread = _art_thread
+    if thread is not None:
+        thread.join(timeout=2)
+
+
+def _art_aborting():
+    try:
+        from .util import MONITOR
+        return bool(MONITOR.abortRequested())
+    except Exception:
+        return False
+
+
 def _ensure_art_thread():
     global _art_thread
     with _art_lock:
         if _art_thread is not None and _art_thread.is_alive():
             return
-        _art_stop.clear()
+        if _art_stop.is_set():
+            return
         _art_thread = threading.Thread(target=_art_loop, name="pm4k-art-timing", daemon=True)
         _art_thread.start()
 
 
 def _art_loop():
-    while not _art_stop.is_set():
+    while not _art_stop.is_set() and not _art_aborting():
         try:
             poll_art()
         except Exception:
             pass
         if _art_stop.wait(_ART_POLL):
+            return
+        if _art_aborting():
             return
         with _art_lock:
             if not _art_pending:
