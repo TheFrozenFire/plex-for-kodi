@@ -101,7 +101,11 @@ class SeasonsMixin(object):
         try:
             from lib import artprefetch
             upcoming = [mli for mli in items[6:] if getattr(mli, "thumbnailImage", None)]
-            artprefetch.prefetch([mli.thumbnailImage for mli in upcoming], items=upcoming)
+            artprefetch.prefetch(
+                [mli.thumbnailImage for mli in upcoming],
+                items=upcoming,
+                generation=artprefetch.token_for(self),
+            )
             target = None
             if focus is not None and focus < len(items) and getattr(items[focus], "dataSource", None):
                 target = items[focus].dataSource

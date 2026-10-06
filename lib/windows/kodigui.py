@@ -18,6 +18,32 @@ from plexnet import plexapp
 MONITOR = None
 
 
+def _flush_art_prefetch(window):
+    token = getattr(window, "_art_token", None)
+    if token is None:
+        return
+    try:
+        from lib import artprefetch
+        artprefetch.flush(token)
+    except Exception:
+        util.DEBUG_LOG("art prefetch flush failed")
+
+
+def _drop_art_prefetch(window):
+    token = getattr(window, "_art_token", None)
+    try:
+        window._art_token = None
+    except Exception:
+        pass
+    if token is None:
+        return
+    try:
+        from lib import artprefetch
+        artprefetch.drop_generation(token)
+    except Exception:
+        util.DEBUG_LOG("art prefetch drop failed")
+
+
 class BaseFunctions(object):
     xmlFile = ''
     path = ''
@@ -196,7 +222,7 @@ class XMLBase(object):
 
 class BaseWindow(XMLBase, xbmcgui.WindowXML, BaseFunctions):
     __slots__ = ("_closing", "_winID", "started", "finishedInit", "dialogProps", "isOpen", "_errored",
-                 "_closeSignalled")
+                 "_closeSignalled", "_art_token")
     supportsAutoPlay = False
 
     def __init__(self, *args, **kwargs):
@@ -276,6 +302,7 @@ class BaseWindow(XMLBase, xbmcgui.WindowXML, BaseFunctions):
             self.doClose()
 
     def onAction(self, action):
+        _flush_art_prefetch(self)
         if XMLBase.goHomeAction(self, action):
             return
         xbmcgui.WindowXML.onAction(self, action)
@@ -367,6 +394,7 @@ class BaseWindow(XMLBase, xbmcgui.WindowXML, BaseFunctions):
         return value
 
     def doClose(self, **kw):
+        _drop_art_prefetch(self)
         force = kw.get('force', True)
         plexapp.util.APP.off('close.windows', self.onCloseSignal)
         util.DEBUG_LOG("{}: doClose called, force: {}", self.__class__.__name__, force)
@@ -425,7 +453,8 @@ class BaseWindow(XMLBase, xbmcgui.WindowXML, BaseFunctions):
 
 
 class BaseDialog(XMLBase, xbmcgui.WindowXMLDialog, BaseFunctions):
-    __slots__ = ("_closing", "_winID", "started", "isOpen", "_errored", "_closeSignalled", "dialogProps")
+    __slots__ = ("_closing", "_winID", "started", "isOpen", "_errored", "_closeSignalled", "dialogProps",
+                 "_art_token")
 
     def __init__(self, *args, **kwargs):
         BaseFunctions.__init__(self)
@@ -456,6 +485,7 @@ class BaseDialog(XMLBase, xbmcgui.WindowXMLDialog, BaseFunctions):
             self.onFirstInit()
 
     def onAction(self, action):
+        _flush_art_prefetch(self)
         if XMLBase.goHomeAction(self, action):
             return
         xbmcgui.WindowXMLDialog.onAction(self, action)
@@ -480,6 +510,7 @@ class BaseDialog(XMLBase, xbmcgui.WindowXMLDialog, BaseFunctions):
             xbmc.log('kodigui.BaseDialog.setProperty: Missing window', xbmc.LOGDEBUG)
 
     def doClose(self, **kw):
+        _drop_art_prefetch(self)
         plexapp.util.APP.off('close.dialogs', self.onCloseSignal)
         self._closing = True
         self.close()

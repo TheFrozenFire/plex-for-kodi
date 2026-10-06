@@ -19,6 +19,6 @@ jobs:
       - name: Lint the dev-only modules
         # The rest of the tree is not style-clean. compileall above is the
         # syntax check for all of it; ruff only covers code added for the harness.
-        run: python -m ruff check lib/timing.py lib/artprefetch.py lib/playbackprep.py lib/stickysubs.py tests/test_timing.py tests/test_timing_safety.py tests/test_timing_tools.py tests/test_latency.py tests/test_worker_shutdown.py tests/test_sticky_subs.py tools/parse_timings.py tools/crawl_feasibility.py
+        run: python -m ruff check lib/timing.py lib/artprefetch.py lib/playbackprep.py lib/stickysubs.py tests/test_timing.py tests/test_timing_safety.py tests/test_timing_tools.py tests/test_latency.py tests/test_worker_shutdown.py tests/test_sticky_subs.py tests/test_gui_thread.py tools/parse_timings.py tools/crawl_feasibility.py
       - name: Tests
         run: python -m pytest

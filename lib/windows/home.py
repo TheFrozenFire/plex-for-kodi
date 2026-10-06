@@ -4681,6 +4681,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             artprefetch.prefetch(
                 [mli.thumbnailImage for mli in upcoming],
                 items=upcoming,
+                generation=artprefetch.token_for(self),
             )
         except Exception:
             util.DEBUG_LOG("Home: art prefetch hook failed")

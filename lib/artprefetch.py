@@ -2,9 +2,10 @@
 """Warm poster and episode thumbs before the next screen needs them.
 
 Downloads run on a few background threads into a small file cache under the
-add-on profile. List items use the file when it is already there, so Kodi does
-not fetch that URL again. Off unless ``prefetch_art`` is turned off; the
-setting defaults on.
+add-on profile. Those threads only write files. A list item is pointed at the
+file later, on the GUI thread, and only while that window generation and the
+item are still alive. Off unless ``prefetch_art`` is turned off; the setting
+defaults on.
 
 The cache key is a hash of the URL. The URL itself is never used as a
 filename and is not logged.
@@ -34,6 +35,9 @@ _threads = []
 _start_lock = threading.Lock()
 _focus_token = None
 _focus_lock = threading.Lock()
+_ready = {}
+_pending = []
+_pending_lock = threading.Lock()
 
 
 def _aborting():
@@ -98,24 +102,38 @@ def resolve(url):
     return url
 
 
-def prefetch(urls, items=None):
-    """Queue image URLs. ``items`` may be list items to point at the file when it lands."""
+def token_for(window):
+    """Generation for one window. A new token means the previous items are gone."""
+    if window is None:
+        return None
+    token = getattr(window, "_art_token", None)
+    if token is None:
+        token = object()
+        try:
+            window._art_token = token
+        except Exception:
+            return None
+    return token
+
+
+def prefetch(urls, items=None, generation=None):
+    """Queue image URLs. List items are recorded for the GUI thread, never for a worker."""
     if not enabled():
         return
-    items = items or []
+    if items and generation is not None:
+        bind(items, generation)
     _ensure_workers()
-    for index, url in enumerate(urls or []):
+    for url in urls or []:
         if not url:
             continue
         text = str(url)
         if not (text.startswith("http://") or text.startswith("https://")):
             continue
-        item = items[index] if index < len(items) else None
         with _seen_lock:
-            if text in _seen and item is None:
+            if text in _seen:
                 continue
             _seen.add(text)
-        _queue.put((text, item))
+        _queue.put(text)
 
 
 def prefetch_focused(item):
@@ -157,6 +175,87 @@ def _ensure_workers():
             _threads.append(thread)
 
 
+def bind(items, generation):
+    """Remember list items to point at a cached file. GUI thread only."""
+    if generation is None or not items or not _on_gui_thread():
+        return
+    immediate = []
+    with _pending_lock:
+        for item in items:
+            if not _alive(item):
+                continue
+            url = _http_url(getattr(item, "thumbnailImage", None))
+            if not url:
+                continue
+            path = _ready.get(url)
+            if path and os.path.isfile(path):
+                immediate.append((item, path))
+            else:
+                _pending.append((generation, url, item))
+    _apply_ready(immediate)
+
+
+def flush(generation):
+    """Point still-living items at files the workers have finished. GUI thread only."""
+    if generation is None or not _on_gui_thread():
+        return
+    immediate = []
+    with _pending_lock:
+        kept = []
+        for gen, url, item in _pending:
+            if gen is not generation or not _alive(item):
+                continue
+            path = _ready.get(url)
+            if path and os.path.isfile(path):
+                immediate.append((item, path))
+            else:
+                kept.append((gen, url, item))
+        _pending[:] = kept
+    _apply_ready(immediate)
+
+
+def drop_generation(generation):
+    """Forget items for a window that is closing. Does not touch the GUI."""
+    if generation is None:
+        return
+    with _pending_lock:
+        _pending[:] = [row for row in _pending if row[0] is not generation]
+
+
+def _on_gui_thread():
+    return threading.current_thread() is threading.main_thread()
+
+
+def _alive(item):
+    return bool(getattr(item, "_valid", True))
+
+
+def _http_url(url):
+    if not url:
+        return ""
+    text = str(url)
+    if text.startswith("http://") or text.startswith("https://"):
+        return text
+    return ""
+
+
+def _apply_ready(pairs):
+    for item, path in pairs:
+        if not _alive(item):
+            continue
+        try:
+            item.setThumbnailImage(path)
+        except Exception:
+            pass
+
+
+def _store_ready(url, path):
+    if not url or not path:
+        return
+    with _pending_lock:
+        _ready[url] = path
+
+
 def shutdown():
     """Unblock the art workers and wait for them. Safe to call more than once."""
     global _stop
@@ -178,14 +277,13 @@ def _worker():
         try:
             if item is _STOP:
                 return
-            url, extra = item
-            if url == "__focus__":
-                _run_focus(extra[0], extra[1])
-            elif url == "__episodes__":
-                season, width, height, offset, limit = extra
+            if isinstance(item, tuple) and item and item[0] == "__focus__":
+                _run_focus(item[1][0], item[1][1])
+            elif isinstance(item, tuple) and item and item[0] == "__episodes__":
+                season, width, height, offset, limit = item[1]
                 _run_episodes(season, width, height, offset, limit)
             else:
-                _download(url, extra)
+                _download(item)
         except Exception:
             pass
         finally:
@@ -278,12 +376,12 @@ def _run_episodes(season_or_show, width, height, offset, limit):
     prefetch(urls)
 
 
-def _download(url, item):
+def _download(url):
     path = path_for(url)
     if not path:
         return
     if os.path.isfile(path) and os.path.getsize(path) > 0:
-        _apply(item, path)
+        _store_ready(url, path)
         return
     try:
         import requests
@@ -310,16 +408,7 @@ def _download(url, item):
             pass
         return
     _trim()
-    _apply(item, path)
-
-
-def _apply(item, path):
-    if item is None:
-        return
-    try:
-        item.setThumbnailImage(path)
-    except Exception:
-        pass
+    _store_ready(url, path)
 
 
 def _trim():
@@ -359,6 +448,9 @@ def _reset_for_tests():
         _seen.clear()
     with _focus_lock:
         _focus_token = None
+    with _pending_lock:
+        _ready.clear()
+        _pending[:] = []
     while True:
         try:
             _queue.get_nowait()
