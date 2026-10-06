@@ -2462,6 +2462,11 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             self.startPathMappingProbe()
 
     def doClose(self, force=True):
+        try:
+            from lib import playbackprep
+            playbackprep.cancel()
+        except Exception:
+            util.DEBUG_LOG("Home: playback prep hook failed")
         util.DEBUG_LOG("Home: doClose called, triggering close.windows")
         plexapp.util.APP.trigger('close.windows')
 
@@ -3642,6 +3647,18 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                     playbackprep.schedule(mli.dataSource, offset)
                 except Exception:
                     util.DEBUG_LOG("Home: playback prep hook failed")
+            else:
+                try:
+                    from lib import playbackprep
+                    playbackprep.cancel()
+                except Exception:
+                    util.DEBUG_LOG("Home: playback prep hook failed")
+        else:
+            try:
+                from lib import playbackprep
+                playbackprep.cancel()
+            except Exception:
+                util.DEBUG_LOG("Home: playback prep hook failed")
 
         if not mli or not mli.getProperty('is.end') or mli.getProperty('is.updating') == '1':
             # round robining

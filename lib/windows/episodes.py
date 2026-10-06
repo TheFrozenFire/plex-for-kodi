@@ -366,6 +366,11 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
             util.LOG("Episodes: Already closing")
             return
         self.closing = True
+        try:
+            from lib import playbackprep
+            playbackprep.cancel()
+        except Exception:
+            util.DEBUG_LOG("Episodes: playback prep hook failed")
         self.episodesPaginator = None
         self.relatedPaginator = None
         TasksMixin.doClose(self)
@@ -378,6 +383,11 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         #super(EpisodesWindow, self).doClose(**kw)
 
     def onBlindClose(self):
+        try:
+            from lib import playbackprep
+            playbackprep.cancel()
+        except Exception:
+            util.DEBUG_LOG("Episodes: playback prep hook failed")
         if self.openedWithAutoPlay and not self.started:
             vp = None
             if self.show_.ratingKey in VIDEO_PROGRESS:

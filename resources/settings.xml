@@ -51,6 +51,13 @@
                     <default>true</default>
                     <control type="toggle"/>
                 </setting>
+                <!-- Hidden. Seconds to keep an unused prefetched playback session. -->
+                <setting id="playback_prep_hold" type="integer" label="35062" help="35063">
+                    <level>0</level>
+                    <default>300</default>
+                    <visible>false</visible>
+                    <control type="edit" format="integer"/>
+                </setting>
                 <setting id="kiosk.always" type="boolean" label="33735" help="33736">
                     <level>0</level>
                     <default>true</default>

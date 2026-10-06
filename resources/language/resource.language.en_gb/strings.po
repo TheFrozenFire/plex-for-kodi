@@ -3404,3 +3404,11 @@ msgstr ""
 msgctxt "#35061"
 msgid "Fetch the playback decision for the focused episode before you press play, and tell Kodi the container so it does not probe the remote file. Turn this off to decide only when playback starts."
 msgstr ""
+
+msgctxt "#35062"
+msgid "Prefetched playback session hold"
+msgstr ""
+
+msgctxt "#35063"
+msgid "Seconds to keep a playback session created by preparing the focused episode, when that episode is not played. Focus leaving the episode, or the screen closing, releases it sooner. Default is 300."
+msgstr ""

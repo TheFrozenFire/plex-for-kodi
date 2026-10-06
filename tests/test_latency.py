@@ -237,3 +237,99 @@ class PlaybackPrepTest(KodiTestCase):
         self.assertTrue(playbackprep.metadata_is_fresh(Video()))
         ENV.settings["fast_playback_start"] = "false"
         self.assertFalse(playbackprep.metadata_is_fresh(Video()))
+
+    def _lease(self, session, rating="55", offset=1000, adopted=False, drop=None, deadline=None):
+        lease = {
+            "session": session,
+            "server": object(),
+            "key": (rating, offset),
+            "obj": "decided",
+            "adopted": adopted,
+            "drop": drop,
+            "deadline": time.time() + 300 if deadline is None else deadline,
+        }
+        playbackprep._LEASES[session] = lease
+        return lease
+
+    def _capture_stops(self):
+        stops = []
+        playbackprep._perform_stop = lambda server, path: stops.append(path)
+        playbackprep._session_is_playing = lambda session, obj=None: False
+        return stops
+
+    def test_hold_defaults_to_five_minutes(self):
+        self.assertEqual(playbackprep.hold_seconds(), 300)
+        ENV.settings["playback_prep_hold"] = "15"
+        self.assertEqual(playbackprep.hold_seconds(), 15)
+
+    def test_an_unused_session_is_stopped_after_the_hold(self):
+        stops = self._capture_stops()
+        session = "sess-secret-value"
+        self._lease(session, deadline=time.time() + 300)
+        playbackprep.release_expired()
+        self.assertEqual(stops, [])
+        playbackprep._LEASES[session]["deadline"] = time.time() - 1
+        playbackprep.release_expired()
+        self.assertEqual(len(stops), 1)
+        self.assertIn("/video/:/transcode/universal/stop?session=", stops[0])
+        self.assertIn("sess-secret-value", stops[0])
+        self.assertNotIn("X-Plex-Token", stops[0])
+
+    def test_focus_change_stops_only_the_previous_item(self):
+        stops = self._capture_stops()
+        self._lease("previous-session", rating="1")
+        self._lease("current-session", rating="2")
+        with playbackprep._LOCK:
+            playbackprep._mark_drop_locked(("2", 1000), "focus")
+        playbackprep.flush_drops()
+        self.assertEqual(len(stops), 1)
+        self.assertIn("previous-session", stops[0])
+        self.assertNotIn("current-session", stops[0])
+
+    def test_a_taken_decision_is_not_stopped(self):
+        stops = self._capture_stops()
+
+        class Video(object):
+            ratingKey = "55"
+
+        session = "taken-session"
+        playbackprep._PREP = {
+            "key": ("55", 1000),
+            "obj": "decided",
+            "at": time.time(),
+            "session": session,
+        }
+        self._lease(session, drop="close", deadline=time.time() - 1)
+        self.assertEqual(playbackprep.take(Video(), 1000), "decided")
+        playbackprep.flush_drops()
+        playbackprep.release_expired()
+        self.assertEqual(stops, [])
+
+    def test_a_session_already_playing_is_not_stopped(self):
+        from lib import player
+
+        stops = []
+        playbackprep._perform_stop = lambda server, path: stops.append(path)
+        session = "live-session"
+        player.PLAYER.sessionID = session
+        try:
+            self._lease(session, deadline=time.time() - 1)
+            playbackprep.release_expired()
+            self.assertEqual(stops, [])
+            self.assertNotIn(session, playbackprep._LEASES)
+        finally:
+            player.PLAYER.sessionID = None
+
+    def test_cleanup_log_redacts_the_session(self):
+        os.environ["PM4K_TIMING"] = "1"
+        timing.reset()
+        try:
+            playbackprep._log_cleanup("timeout", "sess-secret-value", skipped=False)
+            self.assertTrue(ENV.logged("TIMING PREP"))
+            self.assertTrue(ENV.logged("action=release"))
+            self.assertTrue(ENV.logged("reason=timeout"))
+            self.assertTrue(ENV.logged("session=****"))
+            self.assertFalse(ENV.logged("sess-secret-value"))
+        finally:
+            os.environ.pop("PM4K_TIMING", None)
+            timing.reset()
