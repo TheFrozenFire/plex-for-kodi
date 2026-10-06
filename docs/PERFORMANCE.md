@@ -203,6 +203,8 @@ Lines:
 
 Span names: `home.load`, `home.hubs`, `open.show`, `open.season`, `open.detail`, `library.open`, `library.page`, `playback.start`, `return.home`, `return.season`, `return.detail`.
 
+A request keeps the span that was current when its task was queued, including after that span has logged `phase=full`. That covers a hub or an episode reload still in flight. A hub refresh that starts with no span open is its own `home.hubs`, and `phase=full` waits for that fetch. The season screen reads the show and the season inside `open.season` (or `return.season` when a redirect reloads them).
+
 `return.*` logs `first` and `full` together: the screen was already up, and both numbers are how long the reinit reload took. `library.open` logs `first` when the placeholder grid is focused and `full` when the first real chunk has been painted. Later chunks are `library.page`.
 
 Artwork is not proxied. A local proxy would change the URL Kodi caches, so the measurement would not match a normal visit, and it would be a new thing that can fail. Instead, when timing is on, setting an `http` image URL records the time, and a daemon thread checks Kodi's `Textures13.db` (read-only, short timeout) and, if needed, `xbmc.getCacheThumbName`. When timing is off that thread is not started and the database is not opened.

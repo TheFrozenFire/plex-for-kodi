@@ -338,17 +338,52 @@ def note_playback(span):
 
 
 def _request_span():
-    """The span a request line should name. Playback outlives the UI-thread stack."""
+    """The span a request line should name.
+
+    ``current()`` drops a finished span. A background task adopts the span
+    that was open when it was queued, and that span may already have logged
+    ``phase=full`` while the request is still running. Naming the adopted
+    span keeps the request on the transition that started it. Playback is
+    the fallback only when this thread has no span.
+    """
     try:
-        opened = current()
-        if getattr(opened, "real", False):
-            return opened
+        stack = _ctx.get()
+        if stack:
+            top = stack[-1]
+            if getattr(top, "real", False):
+                return top
         playback = _playback_span
         if getattr(playback, "real", False) and not playback._finished:
             return playback
     except Exception as exc:
         _log_hook_failure("current", exc)
     return _NULL
+
+
+def begin_if_idle(name):
+    """Open ``name`` when this thread has no span. Otherwise return None."""
+    try:
+        if not timing_enabled():
+            return None
+        opened = current()
+        if getattr(opened, "real", False):
+            return None
+        return begin(name)
+    except Exception as exc:
+        _log_hook_failure("begin_if_idle", exc)
+        return None
+
+
+def hold_until_tasks(span, tasks):
+    """Close ``span`` now, logging ``phase=full`` once ``tasks`` have finished."""
+    try:
+        if not getattr(span, "real", False):
+            return
+        if tasks:
+            span.after_tasks(tasks)
+        finish(span)
+    except Exception as exc:
+        _log_hook_failure("hold_until_tasks", exc)
 
 
 def finish(span):

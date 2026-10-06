@@ -135,6 +135,48 @@ class TimingHelperTest(KodiTestCase):
         self.assertTrue(ENV.logged("endpoint=plex.tv/users/account"))
         self.assertTrue(ENV.logged("cache=hit"))
 
+    def test_a_finished_span_still_names_an_adopted_request(self):
+        os.environ["PM4K_TIMING"] = "1"
+
+        class Response(object):
+            status_code = 200
+            from_cache = False
+            headers = {}
+            _content = b"ab"
+            elapsed = None
+
+        opened = timing.begin("open.season")
+        timing.finish(opened)
+        self.assertTrue(ENV.logged("name=open.season phase=full"))
+        with timing.adopt(opened):
+            timing.observe_http(
+                "GET",
+                "http://pms.example:32400/library/metadata/16?includeMarkers=1",
+                lambda: Response(),
+            )
+        self.assertTrue(ENV.logged("span={0}".format(opened.id)))
+        self.assertTrue(ENV.logged("endpoint={server}/library/metadata/{id}"))
+        timing.observe_http("GET", "http://pms.example/library/sections", lambda: Response())
+        later = [message for message, _level in ENV.log_lines if "library/sections" in message]
+        self.assertTrue(later)
+        self.assertTrue(all("span=-" in message for message in later))
+
+    def test_idle_thread_opens_its_own_span_until_the_task_finishes(self):
+        os.environ["PM4K_TIMING"] = "1"
+
+        class Task(object):
+            pass
+
+        task = Task()
+        with timing.span("return.home"):
+            self.assertIsNone(timing.begin_if_idle("home.hubs"))
+        opened = timing.begin_if_idle("home.hubs")
+        self.assertTrue(getattr(opened, "real", False))
+        timing.hold_until_tasks(opened, [task])
+        self.assertFalse(ENV.logged("name=home.hubs phase=full"))
+        timing.release_task(task)
+        self.assertTrue(ENV.logged("name=home.hubs phase=full"))
+
     def test_full_waits_for_tasks(self):
         os.environ["PM4K_TIMING"] = "1"
 

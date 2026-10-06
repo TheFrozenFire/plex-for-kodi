@@ -180,6 +180,13 @@ def _call_sites():
     def use_http():
         timing.observe_http("GET", "http://pms.example/library/sections", lambda: _Response())
 
+    def use_idle():
+        timing.hold_until_tasks(None, None)
+        timing.hold_until_tasks(timing.begin_if_idle("home.hubs"), [_Task()])
+        with timing.span("return.home"):
+            nested = timing.begin_if_idle("home.hubs")
+        timing.hold_until_tasks(nested, None)
+
     return {
         "span": use_span,
         "span_func": use_span_func,
@@ -195,6 +202,8 @@ def _call_sites():
         "note_task": use_note,
         "note_playback": use_note_playback,
         "observe_http": use_http,
+        "begin_if_idle": use_idle,
+        "hold_until_tasks": use_idle,
     }
 
 

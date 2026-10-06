@@ -2151,7 +2151,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
 
             task = SectionHubsTask().setup(section_obj, self.crossSectionHubsCallback, self.wantedSections)
             self.tasks.append(task)
-            backgroundthread.BGThreader.addTask(task)
+            self._queueHubTask(task)
 
     def _refreshCrossSectionSources(self, section_key):
         """Refresh library sections that feed cross-section hubs into the given section.
@@ -2201,7 +2201,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         # it permanently too high so Home never redraws.
         self._pendingCrossSources = len(tasks_to_add)
         for task, _ in tasks_to_add:
-            backgroundthread.BGThreader.addTask(task)
+            self._queueHubTask(task)
 
         if tasks_to_add:
             util.DEBUG_LOG('Refreshing cross-section sources for {}: {}',
@@ -4097,6 +4097,23 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                     continue
                 mli.setBoolProperty('is.mapped.broken', section.mappingBroken)
 
+    def _queueHubTask(self, task):
+        """Queue a hub fetch. With no span open, name it ``home.hubs`` until it finishes."""
+        cover = None
+        queued = False
+        try:
+            try:
+                cover = timing.begin_if_idle("home.hubs")
+            except Exception:
+                util.DEBUG_LOG("Home: timing hook failed")
+            backgroundthread.BGThreader.addTask(task)
+            queued = True
+        finally:
+            try:
+                timing.hold_until_tasks(cover, [task] if queued else None)
+            except Exception:
+                util.DEBUG_LOG("Home: timing hook failed")
+
     def showHubs(self, section=None, update=False, force=False, reselect_pos_dict=None):
         # Single choke point for all hub drawing. The lock (RLock) makes every
         # entry point — background callbacks AND the wake/tick/reinit/click paths
@@ -4195,7 +4212,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                 task = SectionHubsTask().setup(section, self.sectionHubsCallback, self.wantedSections,
                                                reselect_pos_dict=rpd)
             self.tasks.append(task)
-            backgroundthread.BGThreader.addTask(task)
+            self._queueHubTask(task)
 
             # Also refresh source library sections that feed cross-section hubs
             # into this section, otherwise getCombinedHubsForSection pulls stale data

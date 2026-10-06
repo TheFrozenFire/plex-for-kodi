@@ -323,11 +323,12 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
     def reset(self, episode, season=None, show=None):
         self.episode = episode
         self.initialEpisode = episode
-        self.season = season if season is not None else self.episode.season()
-        try:
-            self.show_ = show_for_season_open(show, self.episode, self.season)
-        except IndexError:
-            raise util.NoDataException
+        # Resolved on the open or return span. Doing it here, in the constructor,
+        # runs the metadata read before any span exists.
+        self.season = season
+        self.show_ = show
+        self._pending_show = show
+        self._show_season_resolved = False
 
         self.initialized = False
         self.closing = False
@@ -346,6 +347,18 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         self.useBGM = False
         self.debouncing = False
         PlaybackBtnMixin.reset(self)
+
+    def _ensure_show_season(self):
+        """Fetch the season and show on the caller's span, once."""
+        if self._show_season_resolved:
+            return
+        try:
+            if self.season is None and self.episode is not None:
+                self.season = self.episode.season()
+            self.show_ = show_for_season_open(self._pending_show, self.episode, self.season)
+        except IndexError:
+            raise util.NoDataException
+        self._show_season_resolved = True
 
     @busy.dialog(delay_time=1.0)
     def doClose(self, **kw):
@@ -382,6 +395,7 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
             self._openSeason()
 
     def _openSeason(self):
+        self._ensure_show_season()
         self.episodeListControl = kodigui.ManagedControlList(self, self.EPISODE_LIST_ID, 5)
         self.progressImageControl = self.getControl(self.PROGRESS_IMAGE_ID)
 
@@ -405,6 +419,7 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         self.postSetup(select_play_button=False)
 
     def doAutoPlay(self, blind=False):
+        self._ensure_show_season()
         # First reload the video to get all the other info
         self.initialEpisode.reload(checkFiles=1, **VIDEO_RELOAD_KW)
 
@@ -536,6 +551,7 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         player.PLAYER.on('video.progress', self.onVideoProgress)
 
     def _setup(self, from_redirect=False):
+        self._ensure_show_season()
         if not fast_season_paint():
             (self.season or self.show_).reload(checkFiles=1, **VIDEO_RELOAD_KW)
 
