@@ -162,6 +162,13 @@ def _key(video, offset):
     return (str(getattr(video, "ratingKey", "") or ""), int(offset or 0))
 
 
+def discard_prepared():
+    """Drop a prefetched decision so the next play builds a new one."""
+    global _PREP
+    with _LOCK:
+        _PREP = None
+
+
 def shutdown():
     """Unblock the prep worker and wait for it. Safe to call more than once."""
     global _stop
@@ -249,6 +256,11 @@ def _prepare(gen, video, offset):
         with _LOCK:
             if _GEN != gen:
                 return
+        try:
+            from lib import stickysubs
+            stickysubs.apply(video)
+        except Exception:
+            pass
         player = plexplayer.PlexPlayer(video, offset, forceUpdate=True, session_id=session)
         player.build()
         decided = player.getServerDecision()

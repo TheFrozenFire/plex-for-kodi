@@ -121,6 +121,8 @@ class UtilityMonitor(xbmc.Monitor, signalsmixin.SignalsMixin):
             if self.tv_standby:
                 LOG("Monitor: CEC source re-activated")
             self.tv_standby = False
+        elif sender == "xbmc" and method in ("Player.OnAVChange", "Player.OnPropertyChanged"):
+            self._stickySubtitleNotification(method, data)
         elif sender == "xbmc" and method == "System.OnQuit":
             from .windows import windowutils
             LOG("OnQuit: Stopping playback")
@@ -161,6 +163,27 @@ class UtilityMonitor(xbmc.Monitor, signalsmixin.SignalsMixin):
                 windowutils.HOME.closeOption = "restart"
                 windowutils.HOME.doClose()
             return
+
+    def _stickySubtitleNotification(self, method, data):
+        if method == "Player.OnPropertyChanged":
+            payload = data
+            if isinstance(payload, str):
+                try:
+                    import json
+                    payload = json.loads(payload)
+                except Exception:
+                    return
+            prop = payload.get("property") if isinstance(payload, dict) else None
+            if not isinstance(prop, dict):
+                return
+            if "subtitleenabled" not in prop and "currentsubtitle" not in prop:
+                return
+        try:
+            from lib import player
+            from lib import stickysubs
+            stickysubs.poll(getattr(player.PLAYER, "video", None))
+        except Exception:
+            LOG("Sticky subs: notification failed")
 
     def stopPlayback(self):
         LOG('Monitor: Stopping media playback')

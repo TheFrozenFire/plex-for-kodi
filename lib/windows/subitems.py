@@ -7,6 +7,7 @@ from kodi_six import xbmcgui
 from plexnet import playlist, util as pnUtil, plexapp, plexlibrary
 
 from lib import metadata
+from lib import stickysubs
 from lib import timing
 from lib import util
 from lib.util import T
@@ -552,6 +553,7 @@ class ShowWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMixin, 
                     options.append(dropdown.SEPARATOR)
 
                 options.append({'key': 'playback_settings', 'display': T(32925, 'Playback Settings')})
+                options.extend(stickysubs.menu_options(item))
                 if plexapp.ACCOUNT.isAdmin and item.server.allowsMediaDeletion:
                     options.append(dropdown.SEPARATOR)
                     if plexapp.ACCOUNT.isAdmin:
@@ -602,6 +604,8 @@ class ShowWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMixin, 
                                 )
         elif choice['key'] == 'playback_settings':
             self.playbackSettings(self.mediaItem, pos, False)
+        elif choice['key'] in ('sticky_subs_clear', 'sticky_subs_clear_all'):
+            stickysubs.handle_menu(choice['key'], item)
         elif choice['key'] == 'delete':
             if self.delete(item):
                 # cheap way of requesting a home hub refresh because of major deletion

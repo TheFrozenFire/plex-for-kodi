@@ -11,6 +11,7 @@ from plexnet import plexapp, playlist, plexplayer, plexlibrary, util as pnUtil, 
 from lib import backgroundthread
 from lib import metadata
 from lib import player
+from lib import stickysubs
 from lib import timing
 from lib import util
 from lib.util import T
@@ -1280,6 +1281,7 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
                 options.append(dropdown.SEPARATOR)
 
             options.append({'key': 'playback_settings', 'display': T(32925, 'Playback Settings')})
+            options.extend(stickysubs.menu_options(self.show_))
             options.append(dropdown.SEPARATOR)
 
         if plexapp.ACCOUNT.isAdmin:
@@ -1345,6 +1347,8 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
             self.fillEpisodes()
         elif choice['key'] == 'playback_settings':
             self.playbackSettings(self.show_, pos, bottom)
+        elif choice['key'] in ('sticky_subs_clear', 'sticky_subs_clear_all'):
+            stickysubs.handle_menu(choice['key'], self.show_)
         elif choice['key'] == 'refresh':
             mli.dataSource.refresh()
             self.updateItems(mli)

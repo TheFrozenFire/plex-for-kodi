@@ -850,6 +850,12 @@ class SeekPlayerHandler(BasePlayerHandler):
                     util.ERROR("Exception when trying to check for embedded subtitles")
                     break
 
+        try:
+            from lib import stickysubs
+            stickysubs.arm(self.player.video)
+        except Exception:
+            util.DEBUG_LOG("Sticky subs: arm failed")
+
     def onPrePlayStarted(self):
         util.DEBUG_LOG('SeekHandler: onPrePlayStarted, DP: {}', self.isDirectPlay)
         self.prePlayWitnessed = True
@@ -961,6 +967,11 @@ class SeekPlayerHandler(BasePlayerHandler):
         return self._progressHld.get(rk, default)
 
     def onPlayBackStopped(self):
+        try:
+            from lib import stickysubs
+            stickysubs.playback_ended(self.player.video)
+        except Exception:
+            util.DEBUG_LOG("Sticky subs: stop failed")
         util.DEBUG_LOG('SeekHandler: onPlayBackStopped - '
                        'Seeking={0}, QueueingNext={1}, BingeMode={2}, StoppedManually={3}, SkipPostPlay={4}'
                        .format(self.seeking, self.queuingNext, self.inBingeMode, self.stoppedManually,
@@ -1001,6 +1012,11 @@ class SeekPlayerHandler(BasePlayerHandler):
             self.sessionEnded()
 
     def onPlayBackEnded(self):
+        try:
+            from lib import stickysubs
+            stickysubs.playback_ended(self.player.video)
+        except Exception:
+            util.DEBUG_LOG("Sticky subs: end failed")
         util.DEBUG_LOG('SeekHandler: onPlayBackEnded - Seeking={0}, External={1}',
                        self.seeking, self.player.isExternal)
 
@@ -1565,6 +1581,12 @@ class SeekPlayerHandler(BasePlayerHandler):
             util.LOG("Warning: SetSubtitles: no player.video object available")
             return
 
+        try:
+            from lib import stickysubs
+            stickysubs.on_subtitle_pass(self.player.video)
+        except Exception:
+            util.DEBUG_LOG("Sticky subs: subtitle pass failed")
+
         subs = self.player.video.selectedSubtitleStream(
             forced_subtitles_override=honor_forced_subtitles_override and util.getSetting("forced_subtitles_override",
                                                                                          ) and plexnetUtil.ACCOUNT.subtitlesForced == 0,
@@ -1850,6 +1872,12 @@ class SeekPlayerHandler(BasePlayerHandler):
                 util.setGlobalBoolProperty('playback_started_event', False)
                 self.pbStartedRemoved = True
             self.dialog.tick()
+
+        try:
+            from lib import stickysubs
+            stickysubs.poll(self.player.video)
+        except Exception:
+            util.DEBUG_LOG("Sticky subs: poll failed")
 
     def close(self):
         self.hideOSD(delete=True)
@@ -2597,6 +2625,11 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
 
         def work():
             try:
+                try:
+                    from lib import stickysubs
+                    stickysubs.apply(self.video)
+                except Exception:
+                    util.DEBUG_LOG("Sticky subs: apply failed")
                 obj = plexplayer.PlexPlayer(
                     self.video, offset, forceUpdate=force_update, session_id=session_id or self.sessionID
                 )
@@ -2624,6 +2657,11 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
         )
         stopped_during_decision = False
         try:
+            try:
+                from lib import stickysubs
+                stickysubs.apply(self.video)
+            except Exception:
+                util.DEBUG_LOG("Sticky subs: apply failed")
             prepared = None
             if not seeking:
                 try:

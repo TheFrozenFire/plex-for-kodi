@@ -52,6 +52,11 @@
                     <control type="toggle"/>
                 </setting>
                 <!-- Hidden. Seconds to keep an unused prefetched playback session. -->
+                <setting id="sticky_subtitles" type="boolean" label="35064" help="35065">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle"/>
+                </setting>
                 <setting id="playback_prep_hold" type="integer" label="35062" help="35063">
                     <level>0</level>
                     <default>300</default>

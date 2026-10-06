@@ -7,6 +7,7 @@ from kodi_six import xbmcgui
 from plexnet import plexplayer, media, plexobjects, util as pnUtil, plexapp, plexlibrary, playlist, playqueue
 
 from lib import metadata
+from lib import stickysubs
 from lib import timing
 from lib import util
 from lib.util import T
@@ -397,6 +398,9 @@ class PrePlayWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RatingsMixi
         if self.video.type in ('episode', 'movie'):
             options.append({'key': 'to_section', 'display': T(32324, u'Go to {0}').format(self.video.getLibrarySectionTitle())})
 
+        if self.video.type == 'episode':
+            options.extend(stickysubs.menu_options(self.video))
+
         if plexapp.ACCOUNT.isAdmin:
             options.append(dropdown.SEPARATOR)
             options.append({'key': 'refresh', 'display': T(33719, 'Refresh metadata')})
@@ -430,6 +434,8 @@ class PrePlayWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RatingsMixi
             self.processCommand(opener.open(self.video.parentRatingKey))
         elif choice['key'] == 'to_show':
             self.processCommand(opener.open(self.video.grandparentRatingKey))
+        elif choice['key'] in ('sticky_subs_clear', 'sticky_subs_clear_all'):
+            stickysubs.handle_menu(choice['key'], self.video)
         elif choice['key'] == 'to_section':
             self.cameFrom = "library"
             section = plexlibrary.LibrarySection.fromFilter(self.video)

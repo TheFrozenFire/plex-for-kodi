@@ -3412,3 +3412,19 @@ msgstr ""
 msgctxt "#35063"
 msgid "Seconds to keep a playback session created by preparing the focused episode, when that episode is not played. Focus leaving the episode, or the screen closing, releases it sooner. Default is 300."
 msgstr ""
+
+msgctxt "#35064"
+msgid "Remember subtitle choice for the show"
+msgstr ""
+
+msgctxt "#35065"
+msgid "When you turn subtitles off or pick a track while an episode is playing, later episodes of that show use the same choice. The automatic selection at the start of playback is not saved. The show's context menu can clear one show or every show. Turn this off to use Plex's choice every time."
+msgstr ""
+
+msgctxt "#35066"
+msgid "Clear saved subtitles for this show"
+msgstr ""
+
+msgctxt "#35067"
+msgid "Clear saved subtitles for every show"
+msgstr ""
