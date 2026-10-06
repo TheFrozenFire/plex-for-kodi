@@ -247,7 +247,23 @@ What that link feels like, with the connection already open: home is a few secon
 8. **Prefetch the next posters.** Done, behind `prefetch_art` (default on). A few background threads download the displayed-size transcode URL for the rest of the current hub row, the season posters past the first screen, and the focused show's first episode page. List items use the file when it is already on disk. Kodi still fetches an image itself the first time it is on screen.
 
 An artwork `timeout` means that after 20s the URL was not in `Textures13.db` and not under `special://thumbnails`. Two things produce that. Kodi does not fetch art for a list item it has not rendered, so off-screen thumbs sit until the cap. The file check also used to look in the process working directory instead of `special://thumbnails`, so a cached image could be reported as a timeout. The lookup now uses the thumbnails directory.
-8. **A wider mirror only if the crawl says so.** If `tools/crawl_feasibility.py --scope full` is a modest number of requests and bytes, extend step 4 from visible rows to the libraries those rows came from, using `updatedAt` and the notifications socket. If the crawl is large, stop at the steps above.
+
+9. **Prepare playback for the focused episode.** Done, behind `fast_playback_start` (default on). While an episode is focused, one background thread reloads its metadata (chapters and markers) and asks the server for the playback decision. The click reuses that decision when it is still for the same item and offset, and skips the second metadata reload. A seek does not reuse it. If a video is already playing, the decision request runs while that playback stops. An idle player has nothing to stop, so the request stays on the caller. The list item is given the container type (`setMimeType` and `setContentLookup(False)`) so Kodi does not probe the remote file. Markers are already on the episode after that reload; the `markers` playback phase is the local intro check and player stop, which need the decision's metadata, so they are not a second request to run beside the decision.
+
+The wait from `playing` to `first_frame` is Kodi opening the stream. The add-on does not control Kodi's cache. For a large remote file, `advancedsettings.xml` (a Kodi file, not an add-on setting) is the lever:
+
+```xml
+<advancedsettings>
+  <cache>
+    <buffermode>1</buffermode>
+    <memorysize>139460608</memorysize>
+    <readfactor>20</readfactor>
+  </cache>
+</advancedsettings>
+```
+
+`buffermode` 1 caches network files. `memorysize` is bytes of buffer (the example is about 133 MB, enough for a few seconds of a high-bitrate file). `readfactor` is how much faster than realtime Kodi fills that buffer. Raise `memorysize` for a high-bitrate direct play; a buffer smaller than a couple of seconds of the file is what makes the first frame wait. This file is edited by hand in Kodi's userdata folder. The add-on does not write it.
+10. **A wider mirror only if the crawl says so.** If `tools/crawl_feasibility.py --scope full` is a modest number of requests and bytes, extend step 4 from visible rows to the libraries those rows came from, using `updatedAt` and the notifications socket. If the crawl is large, stop at the steps above.
 
 More workers are not a step. Overlapping the few hub requests that already run together helps. Adding many more in-flight calls barely shortens that same set. Delete serial calls first.
 

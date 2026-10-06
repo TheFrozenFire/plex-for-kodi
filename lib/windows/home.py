@@ -3632,6 +3632,16 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                 artprefetch.prefetch_focused(mli.dataSource)
             except Exception:
                 util.DEBUG_LOG("Home: art prefetch hook failed")
+            if getattr(mli.dataSource, "type", None) == "episode":
+                try:
+                    from lib import playbackprep
+                    offset = 0
+                    view_offset = getattr(mli.dataSource, "viewOffset", None)
+                    if view_offset is not None:
+                        offset = view_offset.asInt()
+                    playbackprep.schedule(mli.dataSource, offset)
+                except Exception:
+                    util.DEBUG_LOG("Home: playback prep hook failed")
 
         if not mli or not mli.getProperty('is.end') or mli.getProperty('is.updating') == '1':
             # round robining

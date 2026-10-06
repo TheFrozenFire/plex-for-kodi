@@ -3396,3 +3396,11 @@ msgstr ""
 msgctxt "#35059"
 msgid "Download the next row of posters and the focused show's season and episode thumbnails, at the size the screen displays, on a few background threads. Turn this off to let Kodi fetch each image when it is shown."
 msgstr ""
+
+msgctxt "#35060"
+msgid "Prepare playback for the focused episode"
+msgstr ""
+
+msgctxt "#35061"
+msgid "Fetch the playback decision for the focused episode before you press play, and tell Kodi the container so it does not probe the remote file. Turn this off to decide only when playback starts."
+msgstr ""

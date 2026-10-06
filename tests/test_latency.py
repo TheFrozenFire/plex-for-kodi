@@ -10,7 +10,9 @@ ENV.abort_requested = True
 import os
 import tempfile
 
-from lib import artprefetch, timing
+import time
+
+from lib import artprefetch, playbackprep, timing
 from lib.windows import episodes, pagination
 from plexnet import plexconnection
 from plexnet import util as pnutil
@@ -201,3 +203,37 @@ class ArtPrefetchTest(KodiTestCase):
         found = timing._thumb_candidates("c/c0ffee.jpg", root)
         self.assertEqual(found[0], cached)
         self.assertTrue(os.path.exists(found[0]))
+
+
+class PlaybackPrepTest(KodiTestCase):
+    def tearDown(self):
+        playbackprep._reset_for_tests()
+        super(PlaybackPrepTest, self).tearDown()
+
+    def test_a_fresh_decision_is_used_once(self):
+        playbackprep._reset_for_tests()
+
+        class Video(object):
+            ratingKey = "55"
+
+        video = Video()
+        playbackprep._PREP = {"key": ("55", 1000), "obj": "decided", "at": time.time()}
+        self.assertEqual(playbackprep.take(video, 1000), "decided")
+        self.assertIsNone(playbackprep.take(video, 1000))
+
+    def test_a_different_offset_is_not_reused(self):
+        playbackprep._reset_for_tests()
+
+        class Video(object):
+            ratingKey = "55"
+
+        playbackprep._PREP = {"key": ("55", 1000), "obj": "decided", "at": time.time()}
+        self.assertIsNone(playbackprep.take(Video(), 0))
+
+    def test_recent_metadata_skips_another_reload(self):
+        class Video(object):
+            _pm4k_soft_at = time.time()
+
+        self.assertTrue(playbackprep.metadata_is_fresh(Video()))
+        ENV.settings["fast_playback_start"] = "false"
+        self.assertFalse(playbackprep.metadata_is_fresh(Video()))

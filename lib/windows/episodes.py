@@ -1418,6 +1418,7 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
             self.lastItem = mli
             self.setProgress(mli)
             self.fillRoles()
+            self._schedulePlaybackPrep(mli)
 
         if action in (xbmcgui.ACTION_MOVE_UP, xbmcgui.ACTION_PAGE_UP):
             if mli.getProperty('is.header'):
@@ -1669,12 +1670,14 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
             self.currentItemLoaded = True
             self.lastItem = cur_mli
             self.setBoolProperty('current_item.loaded', True)
+            self._schedulePlaybackPrep(cur_mli)
         elif cur_mli and cur_mli.dataSource:
             # The children page already painted this row. Its chapter and stream
             # detail loads with the rest of the page, off the UI thread.
             self.currentItemLoaded = True
             self.lastItem = cur_mli
             self.setBoolProperty('current_item.loaded', True)
+            self._schedulePlaybackPrep(cur_mli)
         else:
             util.LOG("Episodes: There's no current item to be loaded, something's wrong.")
 
@@ -1700,6 +1703,19 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         tasks.append(task)
 
         backgroundthread.BGThreader.addTasks(tasks)
+
+    def _schedulePlaybackPrep(self, mli):
+        if not mli or not getattr(mli, "dataSource", None):
+            return
+        try:
+            from lib import playbackprep
+            offset = 0
+            view_offset = getattr(mli.dataSource, "viewOffset", None)
+            if view_offset is not None:
+                offset = view_offset.asInt()
+            playbackprep.schedule(mli.dataSource, offset)
+        except Exception:
+            util.DEBUG_LOG("Episodes: playback prep hook failed")
 
     def getPlayButtonID(self, mli, base=None):
         return (base and base or self.PLAY_BUTTON_ID) + (mli.getProperty('media.multiple') and 1000 or 0)
