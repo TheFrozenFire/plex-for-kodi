@@ -3428,3 +3428,15 @@ msgstr ""
 msgctxt "#35067"
 msgid "Clear saved subtitles for every show"
 msgstr ""
+
+msgctxt "#35068"
+msgid "Remote playback"
+msgstr ""
+
+msgctxt "#35069"
+msgid "Playback started"
+msgstr ""
+
+msgctxt "#35070"
+msgid "Playback failed ({0})"
+msgstr ""

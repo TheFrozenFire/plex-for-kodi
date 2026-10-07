@@ -72,6 +72,10 @@ class UtilityMonitor(xbmc.Monitor, signalsmixin.SignalsMixin):
             return
 
         LOG("Notification: {} {} {}".format(sender, method, data))
+        if sender == 'script.plexmod' and method.endswith('PM4K_PLAY'):
+            self._remotePlay(data)
+            return
+
         if sender == 'script.plexmod' and method.endswith('RESTORE'):
             from .windows import kodigui, windowutils
 
@@ -163,6 +167,13 @@ class UtilityMonitor(xbmc.Monitor, signalsmixin.SignalsMixin):
                 windowutils.HOME.closeOption = "restart"
                 windowutils.HOME.doClose()
             return
+
+    def _remotePlay(self, data):
+        try:
+            from lib import remoteplay
+            remoteplay.accept_notification(data)
+        except Exception:
+            LOG("Remote play: notification failed")
 
     def _stickySubtitleNotification(self, method, data):
         if method == "Player.OnPropertyChanged":

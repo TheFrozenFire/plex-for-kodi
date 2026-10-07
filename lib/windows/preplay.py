@@ -143,6 +143,7 @@ class PrePlayWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RatingsMixi
         self.directlyFromWatchlist = kwargs.get('directly_from_watchlist')
         self.is_watchlisted = kwargs.get('is_watchlisted', False)
         self.startOver = kwargs.get('start_over')
+        self.forceResume = bool(kwargs.get('force_resume'))
         self.videos = None
         self.exitCommand = None
         self.trailer = None
@@ -183,7 +184,7 @@ class PrePlayWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RatingsMixi
         # First reload the video to get all the other info
         self.video.reload(checkFiles=1, **VIDEO_RELOAD_KW)
         self.openedWithAutoPlay = True
-        return self.playVideo(from_auto_play=True)
+        return self.playVideo(from_auto_play=True, force_resume=self.forceResume)
 
     @timing.span_func("return.detail")
     @busy.dialog()
@@ -576,7 +577,7 @@ class PrePlayWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RatingsMixi
 
         return True
 
-    def playVideo(self, from_auto_play=False, force_resume_menu=False):
+    def playVideo(self, from_auto_play=False, force_resume_menu=False, force_resume=False):
         if self.playBtnClicked:
             return
 
@@ -586,7 +587,9 @@ class PrePlayWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RatingsMixi
 
         resume = False
         if self.video.viewOffset.asInt() and not self.startOver:
-            if not util.getSetting('assume_resume') or force_resume_menu:
+            if force_resume and not force_resume_menu:
+                resume = True
+            elif not util.getSetting('assume_resume') or force_resume_menu:
                 choice = dropdown.showDropdown(
                     options=[
                         {'key': 'resume', 'display': T(32429, 'Resume from {0}').format(util.timeDisplay(self.video.viewOffset.asInt()).lstrip('0').lstrip(':'))},

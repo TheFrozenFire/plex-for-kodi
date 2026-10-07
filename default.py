@@ -38,8 +38,25 @@ if argvlen > 1:
             if argvlen > 3:
                 update_successful = bool(int(sys.argv[3]))
 
+def _looks_like_remote_play(argv):
+    if len(argv) < 2:
+        return False
+    first = argv[1]
+    return first == "play" or first.startswith("{") or first.startswith("ratingKey=") or first.startswith("key=")
+
+
 started = False
 set_waiting_for_start = False
+if _looks_like_remote_play(sys.argv):
+    try:
+        from lib import remoteplay
+        remoteplay.handoff_argv(sys.argv)
+    except SystemExit:
+        raise
+    except Exception:
+        log('Main: script.plexmod: Remote play handoff failed')
+    sys.exit(0)
+
 try:
     # reactivate/maximize
     if getGlobalProperty('running'):

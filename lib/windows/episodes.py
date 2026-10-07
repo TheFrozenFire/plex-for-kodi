@@ -319,6 +319,7 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         self.directlyFromWatchlist = kwargs.get('directly_from_watchlist')
         self.is_watchlisted = kwargs.get('is_watchlisted', False)
         self.startOver = kwargs.get('start_over')
+        self.forceResume = bool(kwargs.get('force_resume'))
         self.debouncing = False
 
     def reset(self, episode, season=None, show=None):
@@ -437,7 +438,8 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         # We're not hitting onFirstInit when autoplaying from home, setup hooks here, so we can grab video progress
         self._setup_hooks()
         self.openedWithAutoPlay = True
-        return self.playButtonClicked(force_episode=self.initialEpisode, from_auto_play=True, start_over=self.startOver)
+        return self.playButtonClicked(force_episode=self.initialEpisode, from_auto_play=True, start_over=self.startOver,
+                                      force_resume=self.forceResume)
 
     def onFirstInit(self):
         self._onFirstInit()
@@ -1101,7 +1103,7 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         self.processCommand(search.dialog(self, section_id=section_id or None))
 
     def playButtonClicked(self, shuffle=False, force_episode=None, from_auto_play=False, force_resume_menu=False,
-                          start_over=False):
+                          start_over=False, force_resume=False):
         if shuffle:
             seasonOrShow = self.season or self.show_
             items = seasonOrShow.all()
@@ -1113,7 +1115,8 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
 
         else:
             return self.episodeListClicked(force_episode=force_episode, from_auto_play=from_auto_play,
-                                           force_resume_menu=force_resume_menu, start_over=start_over)
+                                           force_resume_menu=force_resume_menu, start_over=start_over,
+                                           force_resume=force_resume)
 
     def shuffleButtonClicked(self):
         self.playButtonClicked(shuffle=True)
@@ -1161,7 +1164,7 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         self.cameFrom = "info"
 
     def episodeListClicked(self, force_episode=None, from_auto_play=False, force_resume_menu=False,
-                           start_over=False):
+                           start_over=False, force_resume=False):
 
         if self.playBtnClicked and not from_auto_play:
             util.DEBUG_LOG("Not honoring play action: currentItemLoaded: {0}, "
@@ -1200,7 +1203,9 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
 
         resume = False
         if episode.viewOffset.asInt() and not start_over:
-            if not util.getSetting('assume_resume') or force_resume_menu:
+            if force_resume and not force_resume_menu:
+                resume = True
+            elif not util.getSetting('assume_resume') or force_resume_menu:
                 choice = dropdown.showDropdown(
                     options=[
                         {'key': 'resume', 'display': T(32429, 'Resume from {0}').format(util.timeDisplay(episode.viewOffset.asInt()).lstrip('0').lstrip(':'))},

@@ -29,6 +29,14 @@ def _flush_art_prefetch(window):
         util.DEBUG_LOG("art prefetch flush failed")
 
 
+def _drain_remote_play():
+    try:
+        from lib import remoteplay
+        remoteplay.drain()
+    except Exception:
+        util.DEBUG_LOG("remote play drain failed")
+
+
 def _drop_art_prefetch(window):
     token = getattr(window, "_art_token", None)
     try:
@@ -303,6 +311,7 @@ class BaseWindow(XMLBase, xbmcgui.WindowXML, BaseFunctions):
 
     def onAction(self, action):
         _flush_art_prefetch(self)
+        _drain_remote_play()
         if XMLBase.goHomeAction(self, action):
             return
         xbmcgui.WindowXML.onAction(self, action)
@@ -486,6 +495,7 @@ class BaseDialog(XMLBase, xbmcgui.WindowXMLDialog, BaseFunctions):
 
     def onAction(self, action):
         _flush_art_prefetch(self)
+        _drain_remote_play()
         if XMLBase.goHomeAction(self, action):
             return
         xbmcgui.WindowXMLDialog.onAction(self, action)
