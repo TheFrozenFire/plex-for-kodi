@@ -784,6 +784,9 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         self._hubRefreshSpan = None
         self._hubApplyLock = threading.Lock()
         self._drainingHubs = False
+        # A skipped paint stays queued. The next action, focus change, or
+        # cron poke tries it again and logs that retry.
+        self._applyHeld = False
         # The five-minute section refresh paints on the script thread and
         # holds a focused row. It must not redraw Continue Watching while
         # the post-playback pass still owns those rows.
@@ -823,6 +826,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         util.setGlobalBoolProperty('off.sections', '')
 
     def onFirstInit(self):
+        self._note_script_thread()
         with timing.span("home.load") as span:
             self._loadHome(span)
 
@@ -888,6 +892,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         self.doClose()
 
     def show(self, **kwargs):
+        self._note_script_thread()
         super(HomeWindow, self).show(**kwargs)
         if self.go_root:
             util.DEBUG_LOG("Home: Go root requested, reinitializing")
@@ -895,6 +900,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
 
     @timing.span_func("return.home")
     def onReInit(self):
+        self._note_script_thread()
         util.DEBUG_LOG("Home: On ReInit")
         if self._ignoreReInit or time.time() < self._goRootHoldUntil:
             # Home is back, even if focus restore is being ignored. A refresh
@@ -2659,6 +2665,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                 util.LOG("Couldn't store last background")
 
     def onAction(self, action):
+        self._note_script_thread()
         controlID = self.getFocusId()
         if not self._shuttingDown:
             try:
@@ -2851,6 +2858,13 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         kodigui.BaseWindow.onAction(self, action)
 
     def onClick(self, controlID):
+        self._note_script_thread()
+        # A hub click is navigation. Record it before a queued reorder can
+        # replace the row this click is about to open.
+        if not self._ignoreInput and 399 < controlID < 500:
+            self._navSinceReturn = True
+        if not self._shuttingDown:
+            self._drain_hub_refresh_safe()
         if self._ignoreInput:
             return
 
@@ -2872,14 +2886,14 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         elif controlID == self.PLAYER_STATUS_BUTTON_ID:
             self.showAudioPlayer()
         elif 399 < controlID < 500:
-            # Select opens the row that is on screen now. A pending reorder
-            # waits until focus leaves, so it cannot land under this click.
-            self._navSinceReturn = True
+            # Select opens the row that is on screen now. Navigation was
+            # recorded above, so a pending reorder waits until focus leaves.
             self.hubItemClicked(controlID)
         elif controlID == self.SEARCH_BUTTON_ID:
             self.searchButtonClicked()
 
     def onFocus(self, controlID):
+        self._note_script_thread()
         # within the 150ms hold window after go_root, any non-section-list focus event is the
         # stray Kodi fires when HOME reactivates with its previously-focused control still
         # recorded. Snap it back and consume the deadline so user input (which arrives well
@@ -3022,6 +3036,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             self._restSectionReady = False
             self._restApplied = False
             self._continueDone = False
+            self._applyHeld = False
             self._mark_hub_refresh("stop", begin=True)
         except Exception:
             util.DEBUG_LOG("Hub refresh: stop hook failed")
@@ -3307,17 +3322,26 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         except Exception:
             visible = False
         if not visible:
+            self._applyHeld = True
             if getattr(self, "_hubRefreshSpan", None) is not None:
                 self._mark_hub_refresh("apply.skipped.not-home")
             elif getattr(self, "_periodicSpan", None) is not None:
                 self._mark_periodic("apply.skipped.not-home")
             return
+        # Home is up and a previous attempt did not paint. Ask again.
+        # Action(noop) is delivered to this window's event loop, which is
+        # what actually applies the rows.
+        if getattr(self, "_applyHeld", False):
+            self._mark_apply_retry()
         self._poke_hub_apply()
 
     def _hub_apply_waiting(self):
         if getattr(self, "_pendingContinue", None):
             return True
-        if getattr(self, "_restReady", None):
+        # Partial follow-up results stay put until every remaining hub
+        # has been stored, then they take the same paint path as Continue
+        # Watching.
+        if getattr(self, "_restLeft", 0) <= 0 and getattr(self, "_restReady", None):
             return True
         if getattr(self, "_restSectionReady", False):
             return True
@@ -3325,9 +3349,17 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             return True
         return False
 
+    def _note_script_thread(self):
+        """Record this callback's thread as the one allowed to paint."""
+        hubrefresh.note_script_thread()
+
     def _hub_apply_block(self):
-        """Why the script thread must not paint yet, or None."""
-        if threading.current_thread() is not threading.main_thread():
+        """Why this thread must not paint yet, or None.
+
+        The add-on script thread is the home window event loop. Under
+        Kodi that is not ``threading.main_thread()``.
+        """
+        if not hubrefresh.on_script_thread():
             return "off-thread"
         if self._shuttingDown or getattr(self, "_closing", False):
             return "shutdown"
@@ -3342,6 +3374,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         return None
 
     def _mark_apply_skip(self, reason):
+        self._applyHeld = True
         phase = "apply.skipped." + reason
         if getattr(self, "_hubRefreshSpan", None) is not None:
             self._mark_hub_refresh(phase)
@@ -3351,6 +3384,20 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             return
         if reason != "off-thread":
             self._mark_hub_refresh(phase)
+
+    def _mark_apply_retry(self):
+        """A queued paint is being asked again. Distinct from the skip reason.
+
+        The same skip phase is logged once. A later attempt has to use
+        its own phase or the retry is invisible.
+        """
+        if getattr(self, "_hubRefreshSpan", None) is not None:
+            self._mark_hub_refresh("apply.retry")
+            return
+        if getattr(self, "_periodicSpan", None) is not None or getattr(self, "_periodicSection", None) is not None:
+            self._mark_periodic("apply.retry")
+            return
+        self._mark_hub_refresh("apply.retry")
 
     def _drain_hub_refresh_safe(self):
         try:
@@ -3381,15 +3428,21 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         if reason:
             # Leave the payloads queued. Home may not be the open window yet,
             # and a noop sent at the season screen never reaches this one.
+            # The next action, focus change, or cron poke tries again.
             self._mark_apply_skip(reason)
             return
+        if getattr(self, "_applyHeld", False):
+            self._mark_apply_retry()
+            self._applyHeld = False
         self._drainingHubs = True
         try:
             with self._hubApplyLock:
                 pending = self._pendingContinue
                 self._pendingContinue = None
-                ready = list(self._restReady)
-                self._restReady = []
+                ready = []
+                if getattr(self, "_restLeft", 0) <= 0 and self._restReady:
+                    ready = list(self._restReady)
+                    self._restReady = []
                 section_ready = self._restSectionReady
                 self._restSectionReady = False
                 periodic = getattr(self, "_periodicSection", None)

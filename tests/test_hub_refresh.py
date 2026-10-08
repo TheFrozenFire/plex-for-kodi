@@ -4,6 +4,9 @@ from __future__ import absolute_import
 
 import ast
 import os
+import threading
+import time
+import traceback
 import unittest
 
 from lib import hubrefresh
@@ -48,6 +51,25 @@ def _gui_calls(node):
         if isinstance(child, ast.Name) and child.id == "xbmcgui":
             hits.append("xbmcgui")
     return hits
+
+
+def _call_names(node):
+    names = []
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Call):
+            continue
+        func = child.func
+        if isinstance(func, ast.Attribute):
+            names.append(func.attr)
+        elif isinstance(func, ast.Name):
+            names.append(func.id)
+    return names
+
+
+# How long a queued paint may sit after Home is the active window before
+# the harness treats the handoff as stuck. The loop returns as soon as
+# the rows are applied.
+_APPLY_WAIT_S = 2.0
 
 
 class HubRefreshDecisionTest(unittest.TestCase):
@@ -152,6 +174,46 @@ class HubRefreshDecisionTest(unittest.TestCase):
         self.assertFalse(hubrefresh.same_generation(previous))
         self.assertFalse(hubrefresh.note_session_end(now=2))
 
+    def test_script_thread_is_the_event_loop_not_python_main(self):
+        # Before any window callback, even Python's main thread is not
+        # the add-on script thread.
+        self.assertFalse(hubrefresh.on_script_thread())
+        seen = {}
+
+        def runner():
+            try:
+                self.assertIsNot(threading.current_thread(), threading.main_thread())
+                self.assertFalse(hubrefresh.on_script_thread())
+                hubrefresh.note_script_thread()
+                seen["on_runner"] = hubrefresh.on_script_thread()
+                seen["ident"] = threading.get_ident()
+            except Exception:
+                seen["error"] = traceback.format_exc()
+
+        worker = threading.Thread(target=runner)
+        worker.start()
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertNotIn("error", seen, seen.get("error"))
+        self.assertTrue(seen["on_runner"])
+        self.assertNotEqual(seen["ident"], threading.get_ident())
+        # The runner's ident must not leak onto this thread.
+        self.assertFalse(hubrefresh.on_script_thread())
+        hubrefresh.reset()
+        self.assertFalse(hubrefresh.on_script_thread())
+
+    def test_event_loop_records_the_script_thread_and_cron_does_not(self):
+        methods = _methods(_HOME)
+        for name in ("HomeWindow.onFirstInit", "HomeWindow.show", "HomeWindow.onReInit",
+                     "HomeWindow.onAction", "HomeWindow.onFocus", "HomeWindow.onClick"):
+            self.assertIn("_note_script_thread", _call_names(methods[name]), name)
+        for name in ("HomeWindow.tick", "HomeWindow._poke_if_home_is_visible",
+                     "HomeWindow._on_continue_reloaded", "HomeWindow._on_rest_hub",
+                     "HomeWindow._drain_hub_refresh"):
+            calls = _call_names(methods[name])
+            self.assertNotIn("_note_script_thread", calls, name)
+            self.assertNotIn("note_script_thread", calls, name)
+
 
 class _Item(object):
     def __init__(self, key):
@@ -218,6 +280,7 @@ class HomeApplyWindowTest(unittest.TestCase):
         win._protectFocus = False
         win._periodicSpan = None
         win._hubRefreshSpan = None
+        win._applyHeld = False
         win._hubApplyLock = __import__("threading").Lock()
         win.updateHubs = {}
         win.lastSection = type("Section", (), {"key": None})()
@@ -233,6 +296,9 @@ class HomeApplyWindowTest(unittest.TestCase):
         win._winID = 13001
         ENV.current_window_id = 14000
         self.win = win
+        # These drains run on the pytest thread. That thread is the event
+        # loop for this window, even though it is also Python's main thread.
+        hubrefresh.note_script_thread()
         self.generation = hubrefresh.note_stop_sent()
 
     def tearDown(self):
@@ -283,6 +349,220 @@ class HomeApplyWindowTest(unittest.TestCase):
         self.assertEqual(painted, "apply")
         self.assertTrue(self.win.shown[0][1]["pin_index"])
         self.assertEqual(self.win.shown[0][0][0].ident, "home.continue")
+
+
+class _Action(object):
+    def getId(self):
+        return 0
+
+
+class ScriptThreadPaintTest(unittest.TestCase):
+    """The home event loop is not Python's main thread under Kodi."""
+
+    def setUp(self):
+        hubrefresh.reset()
+        self._timing = os.environ.get("PM4K_TIMING")
+        os.environ["PM4K_TIMING"] = "1"
+        from lib import timing
+        timing.reset()
+        home = _load_home()
+        from kodienv import ENV
+        self.env = ENV
+        self.home = home
+        self._log_at = len(ENV.log_lines)
+
+    def tearDown(self):
+        hubrefresh.reset()
+        from lib import timing
+        timing.reset()
+        if self._timing is None:
+            os.environ.pop("PM4K_TIMING", None)
+        else:
+            os.environ["PM4K_TIMING"] = self._timing
+
+    def _logged(self, needle):
+        return any(needle in msg for msg, _lvl in self.env.log_lines[self._log_at:])
+
+    def _window(self):
+        win = self.home.HomeWindow.__new__(self.home.HomeWindow)
+        win._shuttingDown = False
+        win._closing = False
+        win._ignoreReInit = False
+        win._ignoreInput = True
+        win._ignoreTick = True
+        win._goRootHoldUntil = 0
+        win._drainingHubs = False
+        win._navSinceReturn = False
+        win._suspendHubNav = False
+        win._deferredHubs = {}
+        win._pendingContinue = None
+        win._restReady = []
+        win._restLeft = 0
+        win._restBatch = None
+        win._restSectionReady = False
+        win._restApplied = False
+        win._continueDone = False
+        win._preserveContinueRows = False
+        win._periodicDraw = False
+        win._periodicSection = None
+        win._protectFocus = False
+        win._periodicSpan = None
+        win._hubRefreshSpan = None
+        win._applyHeld = False
+        win._hubApplyLock = threading.Lock()
+        win._updateSourceChanged = False
+        win.movingSection = False
+        win.lastFocusID = None
+        win.changingServer = False
+        win._checkingForExit = False
+        win.updateHubs = {}
+        win.lastSection = type("Section", (), {"key": None})()
+        win.shown = []
+        win.showHub = lambda *args, **kwargs: win.shown.append((args, kwargs)) or True
+        win.getFocusId = lambda: 50
+        self.ondeck = _Hub("home.ondeck", ("1", "2"))
+        self.continue_hub = _Hub("home.continue", ("3",))
+        self.recent = _Hub("movie.recentlyadded", ("4", "5"))
+        win.hubControls = [
+            _Control(self.ondeck, ("1", "2")),
+            _Control(self.continue_hub, ("3",)),
+            _Control(self.recent, ("4", "5")),
+        ]
+        win._winID = 13001
+        self.env.current_window_id = 14000
+        return win
+
+    def test_non_main_script_runner_applies_continue_and_rest(self):
+        errors = []
+
+        def runner():
+            try:
+                self._run_on_script_thread()
+            except Exception:
+                errors.append(traceback.format_exc())
+
+        worker = threading.Thread(target=runner)
+        worker.start()
+        worker.join(_APPLY_WAIT_S + 3)
+        self.assertFalse(worker.is_alive(), "script runner did not finish")
+        self.assertFalse(errors, errors)
+
+    def _run_on_script_thread(self):
+        self.assertIsNot(threading.current_thread(), threading.main_thread())
+        self.assertFalse(hubrefresh.on_script_thread())
+        win = self._window()
+        generation = hubrefresh.note_stop_sent()
+        fresh_od = _Hub("home.ondeck", ("2", "1"))
+        fresh_cw = _Hub("home.continue", ("6", "3"))
+        fresh_recent = _Hub("movie.recentlyadded", ("5", "4"))
+        win._pendingContinue = (generation, [
+            ("home.ondeck", fresh_od),
+            ("home.continue", fresh_cw),
+        ])
+        win._restBatch = generation
+        win._restLeft = 1
+        win._restReady = []
+
+        pool_errors = []
+
+        def pool_worker():
+            try:
+                # The fetch callback stores the row. It must not paint, and
+                # it must not become the script thread by touching apply.
+                win._on_rest_hub(fresh_recent, generation)
+                win._drain_hub_refresh()
+                if hubrefresh.on_script_thread():
+                    pool_errors.append("pool worker claimed the script thread")
+            except Exception:
+                pool_errors.append(traceback.format_exc())
+
+        pool = threading.Thread(target=pool_worker)
+        pool.start()
+        pool.join(2)
+        self.assertFalse(pool.is_alive())
+        self.assertFalse(pool_errors, pool_errors)
+        self.assertFalse(hubrefresh.on_script_thread())
+        self.assertEqual(win.shown, [])
+        self.assertIsNotNone(win._pendingContinue)
+        self.assertTrue(win._restReady)
+        self.assertTrue(win._hub_apply_waiting())
+
+        # Home is back on screen but is not the active window yet. The
+        # event loop records itself here; the rows stay queued.
+        win.onAction(_Action())
+        self.assertTrue(hubrefresh.on_script_thread())
+        self.assertEqual(win._hub_apply_block(), "not-home")
+        self.assertEqual(win.shown, [])
+        self.assertTrue(win._hub_apply_waiting())
+
+        self.env.current_window_id = win._winID
+        self.assertIsNone(win._hub_apply_block())
+        # The cron tick asks again once Home is visible. It runs on its own
+        # thread, so it must not paint and must not take the script ident.
+        deadline = time.monotonic() + _APPLY_WAIT_S
+        while time.monotonic() < deadline:
+            if not win._hub_apply_waiting():
+                break
+            cron_errors = []
+
+            def cron_tick():
+                try:
+                    painted = len(win.shown)
+                    win.tick()
+                    if len(win.shown) != painted:
+                        cron_errors.append("cron painted")
+                    if hubrefresh.on_script_thread():
+                        cron_errors.append("cron claimed the script thread")
+                except Exception:
+                    cron_errors.append(traceback.format_exc())
+
+            cron = threading.Thread(target=cron_tick)
+            cron.start()
+            cron.join(1)
+            self.assertFalse(cron.is_alive())
+            self.assertFalse(cron_errors, cron_errors)
+            self.assertTrue(hubrefresh.on_script_thread())
+            win.onAction(_Action())
+        else:
+            self.fail("queued hub refresh still pending after Home was the active window")
+
+        self.assertFalse(win._hub_apply_waiting())
+        idents = [call[0][0].ident for call in win.shown]
+        self.assertEqual(idents, ["home.ondeck", "home.continue", "movie.recentlyadded"])
+        self.assertTrue(all(call[1]["pin_index"] for call in win.shown))
+        self.assertIsNone(win._pendingContinue)
+        self.assertFalse(win._restReady)
+        self.assertTrue(self._logged("phase=apply.skipped.off-thread"))
+        self.assertTrue(self._logged("phase=apply.skipped.not-home"))
+        self.assertTrue(self._logged("phase=apply.retry"))
+        self.assertTrue(self._logged("phase=cw.applied"))
+        self.assertTrue(self._logged("phase=rest.applied"))
+        self.assertTrue(self._logged("phase=rest.end"))
+
+        # Focus leaving a control is another chance to paint, on the same thread.
+        win.shown = []
+        again = _Hub("movie.recentlyadded", ("7",))
+        win._restReady = [again]
+        win._restLeft = 0
+        win._restBatch = generation
+        win._restApplied = False
+        win._applyHeld = True
+        win.movingSection = True
+        win.onFocus(50)
+        self.assertEqual([call[0][0].ident for call in win.shown], ["movie.recentlyadded"])
+        self.assertTrue(win.shown[0][1]["pin_index"])
+        self.assertFalse(win._hub_apply_waiting())
+
+        # A click retries as well, and still does not follow an item.
+        win.shown = []
+        clicked = _Hub("home.ondeck", ("8", "2"))
+        win._pendingContinue = (generation, [("home.ondeck", clicked)])
+        win._continueDone = False
+        win._applyHeld = True
+        win.onClick(50)
+        self.assertEqual([call[0][0].ident for call in win.shown], ["home.ondeck"])
+        self.assertTrue(win.shown[0][1]["pin_index"])
+        self.assertFalse(win._hub_apply_waiting())
 
 
 if __name__ == "__main__":

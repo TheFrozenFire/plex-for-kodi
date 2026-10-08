@@ -11,6 +11,10 @@ The rest of the hubs start ``REST_DELAY`` seconds after that read is
 allowed, so new movies and episodes show up without another five-minute
 wait. Continue Watching is not part of that second pass.
 
+Painting happens on the add-on script thread: the thread that runs the
+home window event loop. Kodi's invoker does not use Python's main
+thread for that, so the ident is captured from those callbacks.
+
 A later watch always arms another refresh. There is no minimum watch
 length: a short play can still change On Deck and Continue Watching.
 """
@@ -37,16 +41,45 @@ _pending = None
 _generation = 0
 _cw_started = False
 _rest_at = None
+# threading.get_ident() of the home window event loop. None until a
+# window callback records it. Never filled in from a worker or cron tick.
+_script_ident = None
 
 
 def reset():
     """Drop sequencer state. Tests and shutdown."""
-    global _pending, _generation, _cw_started, _rest_at
+    global _pending, _generation, _cw_started, _rest_at, _script_ident
     with _LOCK:
         _pending = None
         _generation = 0
         _cw_started = False
         _rest_at = None
+        _script_ident = None
+
+
+def note_script_thread():
+    """Remember the thread running the home window event loop.
+
+    Call this from window callbacks (init, show, action, focus, click).
+    A cron tick or a pool worker must not call it: whichever thread
+    calls it becomes the only thread allowed to paint hub updates.
+    """
+    global _script_ident
+    ident = threading.get_ident()
+    with _LOCK:
+        _script_ident = ident
+
+
+def on_script_thread():
+    """True only after the event loop has been seen on this thread.
+
+    Unknown is not the script thread. A worker must not paint just
+    because the ident has not been captured yet, and Python's main
+    thread is not a stand-in for the add-on script.
+    """
+    with _LOCK:
+        ident = _script_ident
+    return ident is not None and ident == threading.get_ident()
 
 
 def is_continue_hub(identifier):
