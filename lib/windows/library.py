@@ -20,6 +20,7 @@ from six.moves import range
 
 from lib import backgroundthread
 from lib import player
+from lib import timing
 from lib import util
 from lib import shuffle
 from lib.util import T
@@ -1546,6 +1547,10 @@ class LibraryWindow(PlaybackBtnMixin, kodigui.MultiWindow, windowutils.UtilMixin
 
     @busy.dialog()
     def fillShows(self):
+        with timing.span("library.open"):
+            self._fillShows()
+
+    def _fillShows(self):
         self.setBoolProperty('no.content', False)
         self.setBoolProperty('no.content.filtered', False)
         self.setBoolProperty('content.filling', True)
@@ -1587,6 +1592,10 @@ class LibraryWindow(PlaybackBtnMixin, kodigui.MultiWindow, windowutils.UtilMixin
                 else:
                     self.setBoolProperty('no.content', True)
 
+                try:
+                    timing.current().mark("first")
+                except Exception:
+                    util.DEBUG_LOG("timing hook failed")
                 return
             else:
                 for startPosition in range(0, totalSize, self.getDefChunkSize(totalSize)):
@@ -1617,6 +1626,10 @@ class LibraryWindow(PlaybackBtnMixin, kodigui.MultiWindow, windowutils.UtilMixin
                 if jumpList is None:
                     util.messageDialog("Error", "There was an error.")
 
+                try:
+                    timing.current().mark("first")
+                except Exception:
+                    util.DEBUG_LOG("timing hook failed")
                 return
 
             idx = 0
@@ -1655,6 +1668,10 @@ class LibraryWindow(PlaybackBtnMixin, kodigui.MultiWindow, windowutils.UtilMixin
 
         self.showPanelControl.selectItem(0)
         self.setFocusId(self.POSTERS_PANEL_ID)
+        try:
+            timing.current().mark("first")
+        except Exception:
+            util.DEBUG_LOG("timing hook failed")
 
         tasks = []
         for startChunkPosition in range(0, totalSize, self.CHUNK_SIZE):
@@ -1674,6 +1691,10 @@ class LibraryWindow(PlaybackBtnMixin, kodigui.MultiWindow, windowutils.UtilMixin
                 self.alreadyFetchedChunkList.add(startChunkPosition)
                 break
 
+        try:
+            timing.current().after_tasks(tasks)
+        except Exception:
+            util.DEBUG_LOG("timing hook failed")
         self.tasks.add(tasks)
         backgroundthread.BGThreader.addTasksToFront(tasks)
 
@@ -1820,6 +1841,10 @@ class LibraryWindow(PlaybackBtnMixin, kodigui.MultiWindow, windowutils.UtilMixin
     def _chunkCallback(self, items, start):
         if not self.showPanelControl or not items or self.closing:
             return
+        try:
+            timing.current().mark("first")
+        except Exception:
+            util.DEBUG_LOG("timing hook failed")
 
         with self.lock:
             pos = start
@@ -1974,12 +1999,16 @@ class LibraryWindow(PlaybackBtnMixin, kodigui.MultiWindow, windowutils.UtilMixin
             util.DEBUG_LOG('Position {0} so requesting chunk {1}', start, startChunkPosition)
             # Keep track of the chunks we've already fetched by storing the chunk's starting position
             self.alreadyFetchedChunkList.add(startChunkPosition)
-            task = ChunkRequestTask().setup(self.section, startChunkPosition, self.CHUNK_SIZE,
-                                            self._chunkCallback, filter_=self.getFilterOpts(), sort=self.getSortOpts(),
-                                            subDir=self.subDir, bool_filters=self.boolFilters)
-
-            self.tasks.add(task)
-            backgroundthread.BGThreader.addTasksToFront([task])
+            with timing.span("library.page") as page_span:
+                task = ChunkRequestTask().setup(self.section, startChunkPosition, self.CHUNK_SIZE,
+                                                self._chunkCallback, filter_=self.getFilterOpts(), sort=self.getSortOpts(),
+                                                subDir=self.subDir, bool_filters=self.boolFilters)
+                try:
+                    page_span.after_tasks([task])
+                except Exception:
+                    util.DEBUG_LOG("timing hook failed")
+                self.tasks.add(task)
+                backgroundthread.BGThreader.addTasksToFront([task])
 
 
 class PostersWindow(kodigui.ControlledWindow, windowutils.UtilMixin):

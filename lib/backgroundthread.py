@@ -52,8 +52,16 @@ class Task:
         BGThreader.addTask(self)
 
     def _run(self):
-        self.run()
-        self.finished = True
+        from . import timing
+        try:
+            with timing.adopt(getattr(self, "_timing_span", None)):
+                self.run()
+            self.finished = True
+        finally:
+            try:
+                timing.release_task(self)
+            except Exception:
+                logging.DEBUG_LOG("timing hook failed")
 
     def run(self):
         pass
@@ -179,12 +187,22 @@ class BackgroundThreader:
             w.shutdown()
 
     def addTask(self, task):
+        from . import timing
+        try:
+            timing.note_task(task)
+        except Exception:
+            logging.DEBUG_LOG("timing hook failed")
         task._priority = self._nextPriority()
         self._queue.put(task)
         self.startWorkers()
 
     def addTasks(self, tasks):
+        from . import timing
         for t in tasks:
+            try:
+                timing.note_task(t)
+            except Exception:
+                logging.DEBUG_LOG("timing hook failed")
             t._priority = self._nextPriority()
             self._queue.put(t)
 
@@ -195,8 +213,13 @@ class BackgroundThreader:
         if lowest is None:
             return self.addTasks(tasks)
 
+        from . import timing
         p = lowest - len(tasks)
         for t in tasks:
+            try:
+                timing.note_task(t)
+            except Exception:
+                logging.DEBUG_LOG("timing hook failed")
             t._priority = p
             self._queue.put(t)
             p += 1

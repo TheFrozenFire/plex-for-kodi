@@ -7,6 +7,8 @@ from kodi_six import xbmcgui
 from plexnet import playlist, util as pnUtil, plexapp, plexlibrary
 
 from lib import metadata
+from lib import stickysubs
+from lib import timing
 from lib import util
 from lib.util import T
 from lib.language_util import getNativeLanguages
@@ -104,17 +106,18 @@ class ShowWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMixin, 
         TasksMixin.doClose(self)
 
     def onFirstInit(self):
-        self.focusPlayButton()
-        self.subItemListControl = kodigui.ManagedControlList(self, self.SUB_ITEM_LIST_ID, 5)
-        self.rolesListControl = kodigui.ManagedControlList(self, self.ROLES_LIST_ID, 5)
-        self.extraListControl = kodigui.ManagedControlList(self, self.EXTRA_LIST_ID, 5)
-        self.relatedListControl = kodigui.ManagedControlList(self, self.RELATED_LIST_ID, 5)
+        with timing.span("open.show"):
+            self.focusPlayButton()
+            self.subItemListControl = kodigui.ManagedControlList(self, self.SUB_ITEM_LIST_ID, 5)
+            self.rolesListControl = kodigui.ManagedControlList(self, self.ROLES_LIST_ID, 5)
+            self.extraListControl = kodigui.ManagedControlList(self, self.EXTRA_LIST_ID, 5)
+            self.relatedListControl = kodigui.ManagedControlList(self, self.RELATED_LIST_ID, 5)
 
-        self.progressImageControl = self.getControl(self.PROGRESS_IMAGE_ID)
+            self.progressImageControl = self.getControl(self.PROGRESS_IMAGE_ID)
 
-        self.setup()
-        self.initialized = True
-        self.themeMusicInit(self.mediaItem)
+            self.setup()
+            self.initialized = True
+            self.themeMusicInit(self.mediaItem)
 
     def onReInit(self):
         PlaybackBtnMixin.onReInit(self)
@@ -127,7 +130,7 @@ class ShowWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMixin, 
             # fixme, multiple? choice?
             self.mediaItem.related_source = "more-from-credits"
         self.mediaItem.reload(includeExtras=1, includeExtrasCount=10, includeOnDeck=1)
-        self.relatedPaginator = RelatedPaginator(self.relatedListControl, leaf_count=int(self.mediaItem.relatedCount),
+        self.relatedPaginator = RelatedPaginator(self.relatedListControl, leaf_count=pagination.related_leaf_count(self.mediaItem),
                                                  parent_window=self)
 
         self.watchlist_setup(self.mediaItem)
@@ -139,11 +142,16 @@ class ShowWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMixin, 
             self.setBoolProperty("is_watchlisted", self.is_watchlisted)
 
         self.updateProperties()
+        try:
+            timing.current().mark("first")
+        except Exception:
+            util.DEBUG_LOG("timing hook failed")
         self.setBoolProperty("initialized", True)
         self.batch_simple([(self.fill, None, None),
                            (self.fillExtras, None, None),
                            (self.fillRelated, None, None),
-                           (self.fillRoles, None, None)])
+                           (self.fillRoles, None, None)],
+                          timing_span=timing.current())
 
     def updateProperties(self):
         self.setProperty('title', self.mediaItem.title)
@@ -545,6 +553,7 @@ class ShowWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMixin, 
                     options.append(dropdown.SEPARATOR)
 
                 options.append({'key': 'playback_settings', 'display': T(32925, 'Playback Settings')})
+                options.extend(stickysubs.menu_options(item))
                 if plexapp.ACCOUNT.isAdmin and item.server.allowsMediaDeletion:
                     options.append(dropdown.SEPARATOR)
                     if plexapp.ACCOUNT.isAdmin:
@@ -595,6 +604,8 @@ class ShowWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMixin, 
                                 )
         elif choice['key'] == 'playback_settings':
             self.playbackSettings(self.mediaItem, pos, False)
+        elif choice['key'] in ('sticky_subs_clear', 'sticky_subs_clear_all'):
+            stickysubs.handle_menu(choice['key'], item)
         elif choice['key'] == 'delete':
             if self.delete(item):
                 # cheap way of requesting a home hub refresh because of major deletion
@@ -727,7 +738,7 @@ class ArtistWindow(ShowWindow):
         self.setFocusId(self.PLAY_BUTTON_ID)
 
     def setup(self):
-        self.relatedPaginator = RelatedPaginator(self.relatedListControl, leaf_count=int(self.mediaItem.relatedCount),
+        self.relatedPaginator = RelatedPaginator(self.relatedListControl, leaf_count=pagination.related_leaf_count(self.mediaItem),
                                                  parent_window=self)
         self.updateProperties()
         self.fill()

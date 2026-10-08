@@ -393,7 +393,16 @@ class Session(CachedSession):
         self._is_cache_disabled = not kwargs.pop('with_cache', False)
         if DEBUG_REQUESTS:
             xbmc.log("Session.request: (cache enabled: %s) %s %s" % (not self._is_cache_disabled, method, url), xbmc.LOGINFO)
-        return CachedSession.request(self, method, url, *args, **kwargs)
+        # One choke point for every plexnet HTTP call (PlexServer.query and
+        # HttpRequest share this session class). No-op unless timing is enabled.
+        # A failure here must still perform the request.
+        try:
+            from lib.timing import observe_http
+        except Exception:
+            return CachedSession.request(self, method, url, *args, **kwargs)
+        return observe_http(
+            method, url, lambda: CachedSession.request(self, method, url, *args, **kwargs)
+        )
 
     def cancel(self):
         for v in self.adapters.values():

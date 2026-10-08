@@ -11,6 +11,8 @@ from plexnet import plexapp, playlist, plexplayer, plexlibrary, util as pnUtil, 
 from lib import backgroundthread
 from lib import metadata
 from lib import player
+from lib import stickysubs
+from lib import timing
 from lib import util
 from lib.util import T
 from lib.language_util import getNativeLanguages
@@ -39,6 +41,32 @@ from .mixins.tasks import TasksMixin
 VIDEO_RELOAD_KW = dict(includeExtras=1, includeExtrasCount=10, includeChapters=1)
 
 
+def fast_season_paint():
+    """One metadata read paints a season. ``checkFiles`` stays on the play path."""
+    return util.getSetting("fast_season_paint", True)
+
+
+def show_for_season_open(show, episode, season):
+    """The show object for a season screen.
+
+    With ``fast_season_paint`` the show already in hand is used as-is. Otherwise
+    it is reloaded, which is a second metadata read before the window can draw.
+    """
+    fetched = show or (episode or season).show()
+    if fast_season_paint():
+        return fetched
+    return fetched.reload(includeExtras=1, includeExtrasCount=10, includeOnDeck=1)
+
+
+def metadata_reload_kwargs(**extra):
+    """Episode metadata for the list. File stats only when fast paint is off."""
+    kw = dict(extra)
+    kw.setdefault("includeChapters", 1)
+    if not fast_season_paint():
+        kw["checkFiles"] = 1
+    return kw
+
+
 class EpisodesReloadTask(backgroundthread.Task):
     def setup(self, episodes, callback, set_item_info=False):
         self.episodes = episodes
@@ -61,17 +89,17 @@ class EpisodesReloadTask(backgroundthread.Task):
         try:
             if epLen == 1:
                 ep, prog = self.episodes[0]
-                ep.reload(checkFiles=1, includeChapters=1, fromMediaChoice=ep.mediaChoice is not None)
+                ep.reload(fromMediaChoice=ep.mediaChoice is not None, **metadata_reload_kwargs())
             elif epLen > 1:
                 # fetch data for all episodes in one go
                 epMap = {str(ep.ratingKey): ep for ep, _ in self.episodes}
                 data = plexobjects.listItems(self.episodes[0][0].server, '/library/metadata/{0}'.format(",".join(list(e.ratingKey for e, _ in self.episodes))), return_data=True,
-                                             checkFiles=1, includeChapters=1, includeMarkers=1)
+                                             **metadata_reload_kwargs(includeMarkers=1))
                 rl_cnt = 0
                 for d in data:
                     ep = epMap.get(d.attrib.get("ratingKey"), None)
                     if ep:
-                        ep.reload(checkFiles=1, includeChapters=1, fromMediaChoice=ep.mediaChoice is not None, data=d)
+                        ep.reload(fromMediaChoice=ep.mediaChoice is not None, data=d, **metadata_reload_kwargs())
                         rl_cnt += 1
                 util.DEBUG_LOG("EpisodesReloadTask: Reloaded data for {}/{} items", rl_cnt, len(self.episodes))
             else:
@@ -291,17 +319,18 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         self.directlyFromWatchlist = kwargs.get('directly_from_watchlist')
         self.is_watchlisted = kwargs.get('is_watchlisted', False)
         self.startOver = kwargs.get('start_over')
+        self.forceResume = bool(kwargs.get('force_resume'))
         self.debouncing = False
 
     def reset(self, episode, season=None, show=None):
         self.episode = episode
         self.initialEpisode = episode
-        self.season = season if season is not None else self.episode.season()
-        try:
-            self.show_ = show or (self.episode or self.season).show().reload(includeExtras=1, includeExtrasCount=10,
-                                                                             includeOnDeck=1)
-        except IndexError:
-            raise util.NoDataException
+        # Resolved on the open or return span. Doing it here, in the constructor,
+        # runs the metadata read before any span exists.
+        self.season = season
+        self.show_ = show
+        self._pending_show = show
+        self._show_season_resolved = False
 
         self.initialized = False
         self.closing = False
@@ -321,12 +350,29 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         self.debouncing = False
         PlaybackBtnMixin.reset(self)
 
+    def _ensure_show_season(self):
+        """Fetch the season and show on the caller's span, once."""
+        if self._show_season_resolved:
+            return
+        try:
+            if self.season is None and self.episode is not None:
+                self.season = self.episode.season()
+            self.show_ = show_for_season_open(self._pending_show, self.episode, self.season)
+        except IndexError:
+            raise util.NoDataException
+        self._show_season_resolved = True
+
     @busy.dialog(delay_time=1.0)
     def doClose(self, **kw):
         if self.closing:
             util.LOG("Episodes: Already closing")
             return
         self.closing = True
+        try:
+            from lib import playbackprep
+            playbackprep.cancel()
+        except Exception:
+            util.DEBUG_LOG("Episodes: playback prep hook failed")
         self.episodesPaginator = None
         self.relatedPaginator = None
         TasksMixin.doClose(self)
@@ -339,6 +385,11 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         #super(EpisodesWindow, self).doClose(**kw)
 
     def onBlindClose(self):
+        try:
+            from lib import playbackprep
+            playbackprep.cancel()
+        except Exception:
+            util.DEBUG_LOG("Episodes: playback prep hook failed")
         if self.openedWithAutoPlay and not self.started:
             vp = None
             if self.show_.ratingKey in VIDEO_PROGRESS:
@@ -352,6 +403,11 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
 
     @busy.dialog(delay_time=2.5)
     def _onFirstInit(self):
+        with timing.span("open.season"):
+            self._openSeason()
+
+    def _openSeason(self):
+        self._ensure_show_season()
         self.episodeListControl = kodigui.ManagedControlList(self, self.EPISODE_LIST_ID, 5)
         self.progressImageControl = self.getControl(self.PROGRESS_IMAGE_ID)
 
@@ -375,19 +431,22 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         self.postSetup(select_play_button=False)
 
     def doAutoPlay(self, blind=False):
+        self._ensure_show_season()
         # First reload the video to get all the other info
         self.initialEpisode.reload(checkFiles=1, **VIDEO_RELOAD_KW)
 
         # We're not hitting onFirstInit when autoplaying from home, setup hooks here, so we can grab video progress
         self._setup_hooks()
         self.openedWithAutoPlay = True
-        return self.playButtonClicked(force_episode=self.initialEpisode, from_auto_play=True, start_over=self.startOver)
+        return self.playButtonClicked(force_episode=self.initialEpisode, from_auto_play=True, start_over=self.startOver,
+                                      force_resume=self.forceResume)
 
     def onFirstInit(self):
         self._onFirstInit()
 
         self.openedWithAutoPlay = False
 
+    @timing.span_func("return.season")
     @busy.dialog()
     def onReInit(self):
         self.playBtnClicked = False
@@ -505,7 +564,9 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         player.PLAYER.on('video.progress', self.onVideoProgress)
 
     def _setup(self, from_redirect=False):
-        (self.season or self.show_).reload(checkFiles=1, **VIDEO_RELOAD_KW)
+        self._ensure_show_season()
+        if not fast_season_paint():
+            (self.season or self.show_).reload(checkFiles=1, **VIDEO_RELOAD_KW)
 
         if not self.episodesPaginator:
             self.episodesPaginator = EpisodesPaginator(self.episodeListControl,
@@ -513,13 +574,31 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
                                                        parent_window=self)
 
         if not self.relatedPaginator:
-            self.relatedPaginator = RelatedPaginator(self.relatedListControl, leaf_count=int(self.show_.relatedCount),
+            self.relatedPaginator = RelatedPaginator(self.relatedListControl,
+                                                     leaf_count=pagination.related_leaf_count(self.show_),
                                                      parent_window=self)
 
         self.watchlist_setup(self.show_)
         self.updateProperties()
         self.setBoolProperty("initialized", True)
         self.fillEpisodes(from_redirect=from_redirect)
+        try:
+            from lib import artprefetch
+            paginator = self.episodesPaginator
+            if paginator is not None and paginator.leafCount:
+                artprefetch.prefetch_episodes(
+                    self.season or self.show_,
+                    self.THUMB_AR16X9_DIM[0],
+                    self.THUMB_AR16X9_DIM[1],
+                    offset=paginator.offset + (paginator._currentAmount or 0),
+                    limit=paginator.pageSize,
+                )
+        except Exception:
+            util.DEBUG_LOG("Episodes: art prefetch hook failed")
+        try:
+            timing.current().mark("first")
+        except Exception:
+            util.DEBUG_LOG("timing hook failed")
 
         # postpone less important tasks
         self.batch_simple([
@@ -527,7 +606,7 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
             (self.fillExtras, None, None),
             (self.fillRelated, None, None),
             (self.fillRoles, None, None),
-        ])
+        ], timing_span=timing.current())
 
         if not self.directlyFromWatchlist:
             self.checkIsWatchlisted(self.show_)
@@ -1024,7 +1103,7 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         self.processCommand(search.dialog(self, section_id=section_id or None))
 
     def playButtonClicked(self, shuffle=False, force_episode=None, from_auto_play=False, force_resume_menu=False,
-                          start_over=False):
+                          start_over=False, force_resume=False):
         if shuffle:
             seasonOrShow = self.season or self.show_
             items = seasonOrShow.all()
@@ -1036,7 +1115,8 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
 
         else:
             return self.episodeListClicked(force_episode=force_episode, from_auto_play=from_auto_play,
-                                           force_resume_menu=force_resume_menu, start_over=start_over)
+                                           force_resume_menu=force_resume_menu, start_over=start_over,
+                                           force_resume=force_resume)
 
     def shuffleButtonClicked(self):
         self.playButtonClicked(shuffle=True)
@@ -1084,7 +1164,7 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         self.cameFrom = "info"
 
     def episodeListClicked(self, force_episode=None, from_auto_play=False, force_resume_menu=False,
-                           start_over=False):
+                           start_over=False, force_resume=False):
 
         if self.playBtnClicked and not from_auto_play:
             util.DEBUG_LOG("Not honoring play action: currentItemLoaded: {0}, "
@@ -1123,7 +1203,9 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
 
         resume = False
         if episode.viewOffset.asInt() and not start_over:
-            if not util.getSetting('assume_resume') or force_resume_menu:
+            if force_resume and not force_resume_menu:
+                resume = True
+            elif not util.getSetting('assume_resume') or force_resume_menu:
                 choice = dropdown.showDropdown(
                     options=[
                         {'key': 'resume', 'display': T(32429, 'Resume from {0}').format(util.timeDisplay(episode.viewOffset.asInt()).lstrip('0').lstrip(':'))},
@@ -1204,6 +1286,7 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
                 options.append(dropdown.SEPARATOR)
 
             options.append({'key': 'playback_settings', 'display': T(32925, 'Playback Settings')})
+            options.extend(stickysubs.menu_options(self.show_))
             options.append(dropdown.SEPARATOR)
 
         if plexapp.ACCOUNT.isAdmin:
@@ -1269,6 +1352,8 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
             self.fillEpisodes()
         elif choice['key'] == 'playback_settings':
             self.playbackSettings(self.show_, pos, bottom)
+        elif choice['key'] in ('sticky_subs_clear', 'sticky_subs_clear_all'):
+            stickysubs.handle_menu(choice['key'], self.show_)
         elif choice['key'] == 'refresh':
             mli.dataSource.refresh()
             self.updateItems(mli)
@@ -1368,6 +1453,7 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
             self.lastItem = mli
             self.setProgress(mli)
             self.fillRoles()
+            self._schedulePlaybackPrep(mli)
 
         if action in (xbmcgui.ACTION_MOVE_UP, xbmcgui.ACTION_PAGE_UP):
             if mli.getProperty('is.header'):
@@ -1598,7 +1684,8 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         tasks = []
         cur_mli = self.episodeListControl.getSelectedItem()
 
-        if cur_mli and cur_mli.dataSource:
+        fast = fast_season_paint()
+        if cur_mli and cur_mli.dataSource and not fast:
             # handle our currently selected episode first, synchronously, then use background tasks to load the remaining
             # episode's details
             item_progress = with_progress
@@ -1606,7 +1693,8 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
                 item_progress = False if cur_mli.dataSource.ratingKey in skip_progress_for else with_progress
 
             try:
-                cur_mli.dataSource.reload(checkFiles=1, includeChapters=1, fromMediaChoice=cur_mli.dataSource.mediaChoice is not None)
+                cur_mli.dataSource.reload(fromMediaChoice=cur_mli.dataSource.mediaChoice is not None,
+                                          **metadata_reload_kwargs())
                 util.DEBUG_LOG("Episodes: Sync-loading currently selected item: {}", cur_mli.dataSource)
                 self._reloadItem(cur_mli, with_progress=item_progress, set_item_info=set_item_info)
             except:
@@ -1617,6 +1705,14 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
             self.currentItemLoaded = True
             self.lastItem = cur_mli
             self.setBoolProperty('current_item.loaded', True)
+            self._schedulePlaybackPrep(cur_mli)
+        elif cur_mli and cur_mli.dataSource:
+            # The children page already painted this row. Its chapter and stream
+            # detail loads with the rest of the page, off the UI thread.
+            self.currentItemLoaded = True
+            self.lastItem = cur_mli
+            self.setBoolProperty('current_item.loaded', True)
+            self._schedulePlaybackPrep(cur_mli)
         else:
             util.LOG("Episodes: There's no current item to be loaded, something's wrong.")
 
@@ -1628,7 +1724,7 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
             if not mli.dataSource:
                 continue
 
-            if mli == cur_mli:
+            if not fast and mli == cur_mli:
                 continue
 
             item_progress = with_progress
@@ -1642,6 +1738,19 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         tasks.append(task)
 
         backgroundthread.BGThreader.addTasks(tasks)
+
+    def _schedulePlaybackPrep(self, mli):
+        if not mli or not getattr(mli, "dataSource", None):
+            return
+        try:
+            from lib import playbackprep
+            offset = 0
+            view_offset = getattr(mli.dataSource, "viewOffset", None)
+            if view_offset is not None:
+                offset = view_offset.asInt()
+            playbackprep.schedule(mli.dataSource, offset)
+        except Exception:
+            util.DEBUG_LOG("Episodes: playback prep hook failed")
 
     def getPlayButtonID(self, mli, base=None):
         return (base and base or self.PLAY_BUTTON_ID) + (mli.getProperty('media.multiple') and 1000 or 0)
@@ -1688,6 +1797,12 @@ class EpisodesWindow(kodigui.ControlledWindow, windowutils.UtilMixin, SeasonsMix
         idx = 0
 
         seasonOrShow = self.season or self.show_
+
+        if fast_season_paint() and seasonOrShow is not None and not seasonOrShow.extras:
+            try:
+                seasonOrShow.reload(**VIDEO_RELOAD_KW)
+            except Exception:
+                util.ERROR("Episodes: extras reload failed")
 
         if not seasonOrShow.extras:
             self.extraListControl.reset()

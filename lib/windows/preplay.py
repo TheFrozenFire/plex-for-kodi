@@ -7,6 +7,8 @@ from kodi_six import xbmcgui
 from plexnet import plexplayer, media, plexobjects, util as pnUtil, plexapp, plexlibrary, playlist, playqueue
 
 from lib import metadata
+from lib import stickysubs
+from lib import timing
 from lib import util
 from lib.util import T
 from lib.language_util import getNativeLanguages
@@ -141,6 +143,7 @@ class PrePlayWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RatingsMixi
         self.directlyFromWatchlist = kwargs.get('directly_from_watchlist')
         self.is_watchlisted = kwargs.get('is_watchlisted', False)
         self.startOver = kwargs.get('start_over')
+        self.forceResume = bool(kwargs.get('force_resume'))
         self.videos = None
         self.exitCommand = None
         self.trailer = None
@@ -159,6 +162,10 @@ class PrePlayWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RatingsMixi
         kodigui.ControlledWindow.doClose(self)
 
     def onFirstInit(self):
+        with timing.span("open.detail"):
+            self._openDetail()
+
+    def _openDetail(self):
         self.extraListControl = kodigui.ManagedControlList(self, self.EXTRA_LIST_ID, 5)
         self.relatedListControl = kodigui.ManagedControlList(self, self.RELATED_LIST_ID, 5)
         self.rolesListControl = kodigui.ManagedControlList(self, self.ROLES_LIST_ID, 5)
@@ -177,8 +184,9 @@ class PrePlayWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RatingsMixi
         # First reload the video to get all the other info
         self.video.reload(checkFiles=1, **VIDEO_RELOAD_KW)
         self.openedWithAutoPlay = True
-        return self.playVideo(from_auto_play=True)
+        return self.playVideo(from_auto_play=True, force_resume=self.forceResume)
 
+    @timing.span_func("return.detail")
     @busy.dialog()
     def onReInit(self):
         PlaybackBtnMixin.onReInit(self)
@@ -391,6 +399,9 @@ class PrePlayWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RatingsMixi
         if self.video.type in ('episode', 'movie'):
             options.append({'key': 'to_section', 'display': T(32324, u'Go to {0}').format(self.video.getLibrarySectionTitle())})
 
+        if self.video.type == 'episode':
+            options.extend(stickysubs.menu_options(self.video))
+
         if plexapp.ACCOUNT.isAdmin:
             options.append(dropdown.SEPARATOR)
             options.append({'key': 'refresh', 'display': T(33719, 'Refresh metadata')})
@@ -424,6 +435,8 @@ class PrePlayWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RatingsMixi
             self.processCommand(opener.open(self.video.parentRatingKey))
         elif choice['key'] == 'to_show':
             self.processCommand(opener.open(self.video.grandparentRatingKey))
+        elif choice['key'] in ('sticky_subs_clear', 'sticky_subs_clear_all'):
+            stickysubs.handle_menu(choice['key'], self.video)
         elif choice['key'] == 'to_section':
             self.cameFrom = "library"
             section = plexlibrary.LibrarySection.fromFilter(self.video)
@@ -564,7 +577,7 @@ class PrePlayWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RatingsMixi
 
         return True
 
-    def playVideo(self, from_auto_play=False, force_resume_menu=False):
+    def playVideo(self, from_auto_play=False, force_resume_menu=False, force_resume=False):
         if self.playBtnClicked:
             return
 
@@ -574,7 +587,9 @@ class PrePlayWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RatingsMixi
 
         resume = False
         if self.video.viewOffset.asInt() and not self.startOver:
-            if not util.getSetting('assume_resume') or force_resume_menu:
+            if force_resume and not force_resume_menu:
+                resume = True
+            elif not util.getSetting('assume_resume') or force_resume_menu:
                 choice = dropdown.showDropdown(
                     options=[
                         {'key': 'resume', 'display': T(32429, 'Resume from {0}').format(util.timeDisplay(self.video.viewOffset.asInt()).lstrip('0').lstrip(':'))},
@@ -674,7 +689,8 @@ class PrePlayWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RatingsMixi
             self.video.related_source = "more-from-credits"
         self.video.reload(checkFiles=1, **VIDEO_RELOAD_KW)
         try:
-            self.relatedPaginator = RelatedPaginator(self.relatedListControl, leaf_count=int(self.video.relatedCount),
+            self.relatedPaginator = RelatedPaginator(self.relatedListControl,
+                                                     leaf_count=pagination.related_leaf_count(self.video),
                                                      parent_window=self)
         except ValueError:
             raise util.NoDataException
@@ -685,12 +701,17 @@ class PrePlayWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RatingsMixi
             self.checkIsWatchlisted(self.video)
 
         self.setInfo()
+        try:
+            timing.current().mark("first")
+        except Exception:
+            util.DEBUG_LOG("timing hook failed")
         self.setBoolProperty("initialized", True)
         self.batch_simple([(self.fillRoles, None, None),
                            (self.fillReviews, None, None),
                            (self.fillExtras, None, None),
                            (self.fillRelated, None, None),
-                           (self.fillCollections, None, None)])
+                           (self.fillCollections, None, None)],
+                          timing_span=timing.current())
 
     def setInfo(self, skip_bg=False):
         if not skip_bg:

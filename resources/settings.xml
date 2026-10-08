@@ -18,6 +18,51 @@
                     <default>false</default>
                     <control type="toggle"/>
                 </setting>
+                <!-- Hidden developer switch. Off by default; PM4K_TIMING=1 is equivalent.
+                     Not shown in the settings UI. -->
+                <setting id="timing_log" type="boolean" label="35050" help="35051">
+                    <level>0</level>
+                    <default>false</default>
+                    <visible>false</visible>
+                    <control type="toggle"/>
+                </setting>
+                <setting id="defer_related_count" type="boolean" label="35052" help="35053">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle"/>
+                </setting>
+                <setting id="fast_season_paint" type="boolean" label="35054" help="35055">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle"/>
+                </setting>
+                <setting id="skip_dead_connections" type="boolean" label="35056" help="35057">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle"/>
+                </setting>
+                <setting id="prefetch_art" type="boolean" label="35058" help="35059">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle"/>
+                </setting>
+                <setting id="fast_playback_start" type="boolean" label="35060" help="35061">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle"/>
+                </setting>
+                <!-- Hidden. Seconds to keep an unused prefetched playback session. -->
+                <setting id="sticky_subtitles" type="boolean" label="35064" help="35065">
+                    <level>0</level>
+                    <default>true</default>
+                    <control type="toggle"/>
+                </setting>
+                <setting id="playback_prep_hold" type="integer" label="35062" help="35063">
+                    <level>0</level>
+                    <default>300</default>
+                    <visible>false</visible>
+                    <control type="edit" format="integer"/>
+                </setting>
                 <setting id="kiosk.always" type="boolean" label="33735" help="33736">
                     <level>0</level>
                     <default>true</default>

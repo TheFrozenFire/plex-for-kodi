@@ -16,6 +16,7 @@ from . import backgroundthread
 from . import kodijsonrpc
 from . import colors
 from .windows import seekdialog, windowutils, blackoutdialog
+from . import timing
 from . import util
 from . import seamless_branching
 from .language_util import getNativeLanguages, resolveLanguage
@@ -778,6 +779,11 @@ class SeekPlayerHandler(BasePlayerHandler):
                 self.pbStartedRemoved = True
 
         self.player.trigger('started.video')
+        try:
+            from lib import hubrefresh
+            hubrefresh.note_playback_started()
+        except Exception:
+            util.DEBUG_LOG("Hub refresh: playback arm failed")
 
         # fixme: move below embedded subtitle check?
         if self.isDirectPlay:
@@ -849,6 +855,12 @@ class SeekPlayerHandler(BasePlayerHandler):
                     util.ERROR("Exception when trying to check for embedded subtitles")
                     break
 
+        try:
+            from lib import stickysubs
+            stickysubs.arm(self.player.video)
+        except Exception:
+            util.DEBUG_LOG("Sticky subs: arm failed")
+
     def onPrePlayStarted(self):
         util.DEBUG_LOG('SeekHandler: onPrePlayStarted, DP: {}', self.isDirectPlay)
         self.prePlayWitnessed = True
@@ -857,6 +869,13 @@ class SeekPlayerHandler(BasePlayerHandler):
 
     def onPlayBackStarted(self):
         util.DEBUG_LOG('SeekHandler: onPlayBackStarted, DP: {}', self.isDirectPlay)
+        # Arm the next home refresh as soon as video starts. A short watch
+        # still changes On Deck, and the previous stop must not swallow it.
+        try:
+            from lib import hubrefresh
+            hubrefresh.note_playback_started()
+        except Exception:
+            util.DEBUG_LOG("Hub refresh: playback arm failed")
 
         self.updateNowPlaying(refreshQueue=True)
 
@@ -960,6 +979,11 @@ class SeekPlayerHandler(BasePlayerHandler):
         return self._progressHld.get(rk, default)
 
     def onPlayBackStopped(self):
+        try:
+            from lib import stickysubs
+            stickysubs.playback_ended(self.player.video)
+        except Exception:
+            util.DEBUG_LOG("Sticky subs: stop failed")
         util.DEBUG_LOG('SeekHandler: onPlayBackStopped - '
                        'Seeking={0}, QueueingNext={1}, BingeMode={2}, StoppedManually={3}, SkipPostPlay={4}'
                        .format(self.seeking, self.queuingNext, self.inBingeMode, self.stoppedManually,
@@ -1000,6 +1024,11 @@ class SeekPlayerHandler(BasePlayerHandler):
             self.sessionEnded()
 
     def onPlayBackEnded(self):
+        try:
+            from lib import stickysubs
+            stickysubs.playback_ended(self.player.video)
+        except Exception:
+            util.DEBUG_LOG("Sticky subs: end failed")
         util.DEBUG_LOG('SeekHandler: onPlayBackEnded - Seeking={0}, External={1}',
                        self.seeking, self.player.isExternal)
 
@@ -1564,6 +1593,12 @@ class SeekPlayerHandler(BasePlayerHandler):
             util.LOG("Warning: SetSubtitles: no player.video object available")
             return
 
+        try:
+            from lib import stickysubs
+            stickysubs.on_subtitle_pass(self.player.video)
+        except Exception:
+            util.DEBUG_LOG("Sticky subs: subtitle pass failed")
+
         subs = self.player.video.selectedSubtitleStream(
             forced_subtitles_override=honor_forced_subtitles_override and util.getSetting("forced_subtitles_override",
                                                                                          ) and plexnetUtil.ACCOUNT.subtitlesForced == 0,
@@ -1849,6 +1884,12 @@ class SeekPlayerHandler(BasePlayerHandler):
                 util.setGlobalBoolProperty('playback_started_event', False)
                 self.pbStartedRemoved = True
             self.dialog.tick()
+
+        try:
+            from lib import stickysubs
+            stickysubs.poll(self.player.video)
+        except Exception:
+            util.DEBUG_LOG("Sticky subs: poll failed")
 
     def close(self):
         self.hideOSD(delete=True)
@@ -2531,20 +2572,51 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
             self.BGMTask = BGMPlayerTask().setup(source, self, volume, *args, **kwargs)
             backgroundthread.BGThreader.addTask(self.BGMTask)
 
+    def _beginPlaybackTiming(self):
+        try:
+            span = timing.begin("playback.start")
+            timing.note_playback(span)
+        except Exception:
+            util.DEBUG_LOG("Player: timing hook failed")
+            span = None
+        self._pb_span = span
+        return span
+
+    def _failPlaybackTiming(self, span):
+        try:
+            timing.finish(span)
+        except Exception:
+            util.DEBUG_LOG("Player: timing hook failed")
+        self._pb_span = None
+
+    def _pausePlaybackTiming(self, span):
+        """Drop the span from this thread. It stays open until the first frame."""
+        try:
+            timing.pause_span(span)
+        except Exception:
+            util.DEBUG_LOG("Player: timing hook failed")
+
     def playVideo(self, video, resume=False, force_update=False, session_id=None, handler=None):
-        if self.bgmPlaying:
-            self.stopAndWait()
+        span = self._beginPlaybackTiming()
+        try:
+            if self.bgmPlaying:
+                self.stopAndWait()
 
-        if handler and isinstance(handler, SeekPlayerHandler):
-            self.handler = handler
-            self.handler.reused = True
-        else:
-            self.handler = SeekPlayerHandler(self, session_id or self.sessionID)
+            if handler and isinstance(handler, SeekPlayerHandler):
+                self.handler = handler
+                self.handler.reused = True
+            else:
+                self.handler = SeekPlayerHandler(self, session_id or self.sessionID)
 
-        self.video = video
-        self.resume = resume
-        self.open()
-        self._playVideo(resume and video.viewOffset.asInt() or 0, force_update=force_update, session_id=session_id)
+            self.video = video
+            self.resume = resume
+            self.open()
+            self._playVideo(resume and video.viewOffset.asInt() or 0, force_update=force_update, session_id=session_id)
+        except Exception:
+            self._failPlaybackTiming(span)
+            raise
+        finally:
+            self._pausePlaybackTiming(span)
 
     def getOSSPathHint(self, meta):
         # only hint the path one folder above for a movie, two folders above for TV
@@ -2560,6 +2632,34 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
             cleaned_path = ""
         return cleaned_path
 
+    def _decideWhileStopping(self, offset, force_update, session_id):
+        result = {}
+
+        def work():
+            try:
+                try:
+                    from lib import stickysubs
+                    stickysubs.apply(self.video)
+                except Exception:
+                    util.DEBUG_LOG("Sticky subs: apply failed")
+                obj = plexplayer.PlexPlayer(
+                    self.video, offset, forceUpdate=force_update, session_id=session_id or self.sessionID
+                )
+                obj.build()
+                result["obj"] = obj.getServerDecision()
+            except Exception as exc:
+                result["exc"] = exc
+
+        worker = threading.Thread(target=work, name="pm4k-decision", daemon=True)
+        worker.start()
+        try:
+            self.stopAndWait()
+        finally:
+            worker.join()
+        if "exc" in result:
+            raise result["exc"]
+        return result.get("obj")
+
     def _playVideo(self, offset=0, seeking=0, force_update=False, playerObject=None, session_id=None):
         self.sessionID = session_id or self.sessionID
         self.trigger('new.video', video=self.video)
@@ -2567,30 +2667,71 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
             'change.background',
             url=self.video.defaultArt.asTranscodedImageURL(1920, 1080, opacity=60, background=colors.noAlpha.Background)
         )
+        stopped_during_decision = False
         try:
-            if not playerObject:
-                self.playerObject = plexplayer.PlexPlayer(self.video, offset, forceUpdate=force_update, session_id=self.sessionID)
-                self.playerObject.build()
-            self.playerObject = self.playerObject.getServerDecision()
+            try:
+                from lib import stickysubs
+                stickysubs.apply(self.video)
+            except Exception:
+                util.DEBUG_LOG("Sticky subs: apply failed")
+            prepared = None
+            if not seeking:
+                try:
+                    from lib import playbackprep
+                    prepared = playbackprep.take(self.video, offset)
+                except Exception:
+                    prepared = None
+            if prepared is not None:
+                self.playerObject = prepared
+            elif not playerObject:
+                fast = False
+                try:
+                    from lib import playbackprep
+                    # stopAndWait returns at once when nothing is playing. Overlap
+                    # it with the decision only while a current playback is stopping.
+                    fast = playbackprep.enabled() and self.isPlaying()
+                except Exception:
+                    fast = False
+                if fast:
+                    self.playerObject = self._decideWhileStopping(offset, force_update, session_id)
+                    stopped_during_decision = True
+                else:
+                    self.playerObject = plexplayer.PlexPlayer(self.video, offset, forceUpdate=force_update, session_id=self.sessionID)
+                    self.playerObject.build()
+                    self.playerObject = self.playerObject.getServerDecision()
+            else:
+                self.playerObject = playerObject
+                self.playerObject = self.playerObject.getServerDecision()
         except plexplayer.DecisionFailure as e:
             util.showNotification(e.reason, header=util.T(32448, 'Playback Failed!'))
             raise
         except:
             util.ERROR(notify=True)
+            try:
+                timing.finish(getattr(self, "_pb_span", None))
+            except Exception:
+                util.DEBUG_LOG("Player: timing hook failed")
+            self._pb_span = None
             return
 
         meta = self.playerObject.metadata
+        mode = "transcode" if getattr(meta, "isTranscoded", False) else "direct"
+        try:
+            timing.play_phase(getattr(self, "_pb_span", None), "decision", mode=mode)
+        except Exception:
+            util.DEBUG_LOG("Player: timing hook failed")
         url = meta.streamUrls[0]
 
         bifURL = self.playerObject.getBifUrl()
         util.DEBUG_LOG('Playing URL(+{1}ms): {0}{2}', plexnetUtil.cleanToken(url), offset, bifURL and ' - indexed' or '')
 
         self.ignoreStopEvents = True
-        if self.isPlaying():
-            # Kodi delivers the stopped playback's terminal event on its own time; if it lands
-            # after the fence below is lifted, it must not be mistaken for the new item failing
-            self._pendingStaleStop = True
-        self.stopAndWait()  # Stop before setting up the handler to prevent player events from causing havoc
+        if not stopped_during_decision:
+            if self.isPlaying():
+                # Kodi delivers the stopped playback's terminal event on its own time; if it lands
+                # after the fence below is lifted, it must not be mistaken for the new item failing
+                self._pendingStaleStop = True
+            self.stopAndWait()  # Stop before setting up the handler to prevent player events from causing havoc
         if self.handler and self.handler.queuingNext and util.addonSettings.consecutiveVideoPbWait:
             util.DEBUG_LOG(
                 "Waiting for {}s until playing back next item".format(util.addonSettings.consecutiveVideoPbWait))
@@ -2662,6 +2803,10 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
             probOff = self.handler.getIntroOffset(offset, setSkipped=True)
             if probOff:
                 introOffset = probOff
+        try:
+            timing.play_phase(getattr(self, "_pb_span", None), "markers")
+        except Exception:
+            util.DEBUG_LOG("Player: timing hook failed")
 
         if meta.isTranscoded:
             self.handler.mode = self.handler.MODE_RELATIVE
@@ -2727,6 +2872,24 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
                 'X-Plex-Session-Id': self.sessionID
             })
         li = xbmcgui.ListItem(self.video.title, path=url)
+        try:
+            from lib import playbackprep
+            if playbackprep.enabled() and not meta.isMapped:
+                mime = {
+                    "mkv": "video/x-matroska",
+                    "mp4": "video/mp4",
+                    "mov": "video/quicktime",
+                    "m4v": "video/mp4",
+                    "ts": "video/mp2t",
+                    "mpegts": "video/mp2t",
+                }.get(str(getattr(meta, "streamFormat", "") or "").lower())
+                if mime:
+                    # Tells Kodi the container so it does not probe the remote
+                    # file before the first frame. Playback still uses the URL.
+                    li.setMimeType(mime)
+                    li.setContentLookup(False)
+        except Exception:
+            util.DEBUG_LOG("Player: mime hook failed")
         vtype = self.video.type if self.video.type in ('movie', 'episode', 'musicvideo') else 'video'
 
         util.setGlobalProperty("current_path", self.getOSSPathHint(meta), base='videoinfo.{0}')
@@ -2833,9 +2996,24 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
         self.trigger('starting.video')
         self.handler.queuingNext = False
         self.handler.queuingSpecific = False
+        try:
+            timing.play_phase(getattr(self, "_pb_span", None), "stream_open")
+        except Exception:
+            util.DEBUG_LOG("Player: timing hook failed")
         self.play(url, li)
 
     def playVideoPlaylist(self, playlist, resume=False, handler=None, session_id=None):
+        # Season playback with more than one episode comes through here, not playVideo.
+        span = self._beginPlaybackTiming()
+        try:
+            self._playVideoPlaylist(playlist, resume=resume, handler=handler, session_id=session_id)
+        except Exception:
+            self._failPlaybackTiming(span)
+            raise
+        finally:
+            self._pausePlaybackTiming(span)
+
+    def _playVideoPlaylist(self, playlist, resume=False, handler=None, session_id=None):
         if self.bgmPlaying:
             self.stopAndWait()
 
@@ -2858,7 +3036,13 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
         if playlist.isRemote:
             self.handler.playQueue = playlist
         self.video = playlist.current()
-        self.video.softReload(includeChapters=1)
+        try:
+            from lib import playbackprep
+            fresh = playbackprep.metadata_is_fresh(self.video)
+        except Exception:
+            fresh = False
+        if not fresh:
+            self.video.softReload(includeChapters=1)
         self.resume = resume
         self.open()
         self._playVideo(resume and self.video.viewOffset.asInt() or 0, seeking=handler and handler.SEEK_PLAYLIST or 0,
@@ -3016,9 +3200,30 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
             self._pendingStaleStop = False
         self.trigger('playback.started')
 
+        try:
+            timing.play_phase(getattr(self, "_pb_span", None), "playing")
+        except Exception:
+            util.DEBUG_LOG("Player: timing hook failed")
+        try:
+            video = bool(self.isPlayingVideo())
+        except Exception:
+            video = False
+        handler = self.handler
+        if not video and handler is not None and getattr(handler, "timelineType", None) == "video":
+            video = True
+        if video:
+            try:
+                from lib import hubrefresh
+                hubrefresh.note_playback_started()
+            except Exception:
+                util.DEBUG_LOG("Hub refresh: playback arm failed")
         if not self.handler:
             return
         self.handler.onPlayBackStarted()
+        try:
+            timing.play_phase(getattr(self, "_pb_span", None), "subtitles")
+        except Exception:
+            util.DEBUG_LOG("Player: timing hook failed")
 
     def onAVChange(self):
         if not self.sessionID:
@@ -3040,6 +3245,14 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
         self.isExternal = self.isExternalPlayer()
         self.trigger('av.started')
         self.started = True
+        try:
+            span = getattr(self, "_pb_span", None)
+            timing.play_phase(span, "first_frame")
+            timing.mark(span, "first")
+            timing.finish(span)
+        except Exception:
+            util.DEBUG_LOG("Player: timing hook failed")
+        self._pb_span = None
         if not self.handler:
             return
         self.handler.onAVStarted()

@@ -96,7 +96,7 @@ class MCLPaginator(object):
                 amount += offset
                 offset = 0
 
-        else:
+        elif self.leafCount is not None:
             # move the slice to the right
             itemsLeft = leafCount - offset
             # avoid short pages on the right end
@@ -105,17 +105,32 @@ class MCLPaginator(object):
 
         self.offset = offset
         data = self.getData(offset, amount)
+        self._absorb_total(data)
         self._lastAmount = self._currentAmount
         self._currentAmount = len(data)
         return data
 
+    def _absorb_total(self, data):
+        """Learn the hub size from the page that was going to be fetched anyway."""
+        if self.leafCount is not None or not data:
+            return
+        total = getattr(data, "totalSize", None)
+        if total is None:
+            return
+        as_int = getattr(total, "asInt", None)
+        try:
+            self.leafCount = as_int() if callable(as_int) else int(total)
+        except (TypeError, ValueError):
+            return
+
     @property
     def initialPage(self):
         amount = self.initialPageSize
-        if self.initialPageSize + self.orphans >= self.leafCount:
+        if self.leafCount is not None and self.initialPageSize + self.orphans >= self.leafCount:
             amount = self.initialPageSize + self.orphans
 
         data = self.getData(self.offset, amount)
+        self._absorb_total(data)
         if data:
             self._lastAmount = self._currentAmount
             self._currentAmount = len(data)
@@ -130,7 +145,10 @@ class MCLPaginator(object):
         """
         idx = 0
         moreLeft = self.offset > 0
-        moreRight = self.offset + self._currentAmount < self.leafCount
+        if self.leafCount is None:
+            moreRight = self._currentAmount >= self.pageSize
+        else:
+            moreRight = self.offset + self._currentAmount < self.leafCount
 
         finalItems = []
         thumbFallback = self.thumbFallback
@@ -199,6 +217,8 @@ class MCLPaginator(object):
 
     @property
     def canSimpleWrap(self):
+        if self.leafCount is None:
+            return False
         return self.initialPageSize + self.orphans >= self.leafCount
 
     def wrap(self, mli, last_mli, action):
@@ -250,6 +270,18 @@ class MCLPaginator(object):
 
         if items:
             return items
+
+
+def related_leaf_count(item):
+    """Size of a related hub.
+
+    When ``defer_related_count`` is on (the default), this does not ask the
+    server for a count. The paginator learns ``totalSize`` from the page it
+    fetches to draw the hub, after the screen has painted.
+    """
+    if util.getSetting("defer_related_count", True):
+        return None
+    return int(item.relatedCount)
 
 
 class BaseRelatedPaginator(MCLPaginator):

@@ -98,4 +98,23 @@ class SeasonsMixin(object):
         if focus is not None and do_focus:
             subItemListControl.setSelectedItemByPos(focus)
 
+        try:
+            from lib import artprefetch
+            upcoming = [mli for mli in items[6:] if getattr(mli, "thumbnailImage", None)]
+            artprefetch.prefetch(
+                [mli.thumbnailImage for mli in upcoming],
+                items=upcoming,
+                generation=artprefetch.token_for(self),
+            )
+            target = None
+            if focus is not None and focus < len(items) and getattr(items[focus], "dataSource", None):
+                target = items[focus].dataSource
+            elif seasons:
+                target = seasons[0]
+            if target is not None:
+                width, height = util.scaleResolution(657, 393)
+                artprefetch.prefetch_episodes(target, width, height, offset=0, limit=12)
+        except Exception:
+            util.DEBUG_LOG("Seasons: art prefetch hook failed")
+
         return True

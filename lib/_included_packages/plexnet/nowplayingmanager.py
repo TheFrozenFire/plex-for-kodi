@@ -173,6 +173,16 @@ class NowPlayingManager(object):
 
         context = request.createRequestContext("timelineUpdate", callback.Callable(self.onTimelineResponse))
         context.playQueue = timeline.playQueue
+        # Home reloads Continue Watching only after THIS request finishes, so the
+        # hub read cannot race the watch-position write. ``awaitHubRefresh`` starts
+        # as True; Home replaces it with a token before the request is started.
+        # Audio timelines are not part of that refresh.
+        if timelineType == "video" and timeline.state == "stopped":
+            context.awaitHubRefresh = True
+            try:
+                util.APP.trigger("np:timelineStopSent", context=context)
+            except Exception:
+                util.DEBUG_LOG("Timeline: stop-sent hook failed")
         util.APP.startRequest(request, context)
 
     def getServerTimeline(self, timelineType):
@@ -188,6 +198,16 @@ class NowPlayingManager(object):
         self.timelines[timelineType].setControllable(name, isControllable)
 
     def onTimelineResponse(self, request, response, context):
+        # True means Home never claimed the request. An int token is the stop
+        # that is allowed to start the Continue Watching read. Error and timeout
+        # responses still count: the request is finished either way.
+        token = getattr(context, "awaitHubRefresh", None)
+        if token and token is not True:
+            try:
+                util.APP.trigger("np:timelineStopped", token=token)
+            except Exception:
+                util.DEBUG_LOG("Timeline: stop-ack hook failed")
+
         context.request.server.trigger("np:timelineResponse", response=response)
 
         # Server may signal that the current stream was killed (admin "stop stream",

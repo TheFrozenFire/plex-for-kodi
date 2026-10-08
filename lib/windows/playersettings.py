@@ -202,6 +202,12 @@ class VideoSettingsDialog(kodigui.BaseDialog, util.CronReceiver, PlexSubtitleDow
             if downloaded:
                 self.video.selectStream(downloaded, from_session=not self.nonPlayback, sync_to_server=False)
                 self.video.manually_selected_sub_stream = downloaded.id
+                if not self.nonPlayback:
+                    try:
+                        from lib import stickysubs
+                        stickysubs.remember_stream(self.video, downloaded)
+                    except Exception:
+                        util.DEBUG_LOG("Sticky subs: remember failed")
         elif result == 'quality':
             idx = None
             override = self.qualityOverride
@@ -275,6 +281,12 @@ def showSubtitlesDialog(video, non_playback=False, session_id=None):
     video.selectStream(choice, from_session=not non_playback, session_id=session_id)
     video.clearCache()
     video.manually_selected_sub_stream = choice.id
+    if not non_playback:
+        try:
+            from lib import stickysubs
+            stickysubs.remember_stream(video, choice)
+        except Exception:
+            util.DEBUG_LOG("Sticky subs: remember failed")
 
 
 def showQualityDialog(video, non_playback=False, selected_idx=None):

@@ -18,6 +18,56 @@ from plexnet import plexapp
 MONITOR = None
 
 
+def _service_script_thread(window):
+    """Record this callback as the event loop, then apply queued GUI work.
+
+    Art prefetch and remote play both wait for this thread. Call it from
+    a window action. A worker must not call it: that would claim the
+    event loop and then paint.
+    """
+    try:
+        from lib import hubrefresh
+        hubrefresh.note_script_thread()
+    except Exception:
+        util.DEBUG_LOG("script thread note failed")
+    _flush_art_prefetch(window)
+    _drain_remote_play()
+
+
+def _flush_art_prefetch(window):
+    token = getattr(window, "_art_token", None)
+    if token is None:
+        return
+    try:
+        from lib import artprefetch
+        artprefetch.flush(token)
+    except Exception:
+        util.DEBUG_LOG("art prefetch flush failed")
+
+
+def _drain_remote_play():
+    try:
+        from lib import remoteplay
+        remoteplay.drain()
+    except Exception:
+        util.DEBUG_LOG("remote play drain failed")
+
+
+def _drop_art_prefetch(window):
+    token = getattr(window, "_art_token", None)
+    try:
+        window._art_token = None
+    except Exception:
+        pass
+    if token is None:
+        return
+    try:
+        from lib import artprefetch
+        artprefetch.drop_generation(token)
+    except Exception:
+        util.DEBUG_LOG("art prefetch drop failed")
+
+
 class BaseFunctions(object):
     xmlFile = ''
     path = ''
@@ -196,7 +246,7 @@ class XMLBase(object):
 
 class BaseWindow(XMLBase, xbmcgui.WindowXML, BaseFunctions):
     __slots__ = ("_closing", "_winID", "started", "finishedInit", "dialogProps", "isOpen", "_errored",
-                 "_closeSignalled")
+                 "_closeSignalled", "_art_token")
     supportsAutoPlay = False
 
     def __init__(self, *args, **kwargs):
@@ -276,6 +326,7 @@ class BaseWindow(XMLBase, xbmcgui.WindowXML, BaseFunctions):
             self.doClose()
 
     def onAction(self, action):
+        _service_script_thread(self)
         if XMLBase.goHomeAction(self, action):
             return
         xbmcgui.WindowXML.onAction(self, action)
@@ -367,6 +418,7 @@ class BaseWindow(XMLBase, xbmcgui.WindowXML, BaseFunctions):
         return value
 
     def doClose(self, **kw):
+        _drop_art_prefetch(self)
         force = kw.get('force', True)
         plexapp.util.APP.off('close.windows', self.onCloseSignal)
         util.DEBUG_LOG("{}: doClose called, force: {}", self.__class__.__name__, force)
@@ -425,7 +477,8 @@ class BaseWindow(XMLBase, xbmcgui.WindowXML, BaseFunctions):
 
 
 class BaseDialog(XMLBase, xbmcgui.WindowXMLDialog, BaseFunctions):
-    __slots__ = ("_closing", "_winID", "started", "isOpen", "_errored", "_closeSignalled", "dialogProps")
+    __slots__ = ("_closing", "_winID", "started", "isOpen", "_errored", "_closeSignalled", "dialogProps",
+                 "_art_token")
 
     def __init__(self, *args, **kwargs):
         BaseFunctions.__init__(self)
@@ -456,6 +509,7 @@ class BaseDialog(XMLBase, xbmcgui.WindowXMLDialog, BaseFunctions):
             self.onFirstInit()
 
     def onAction(self, action):
+        _service_script_thread(self)
         if XMLBase.goHomeAction(self, action):
             return
         xbmcgui.WindowXMLDialog.onAction(self, action)
@@ -480,6 +534,7 @@ class BaseDialog(XMLBase, xbmcgui.WindowXMLDialog, BaseFunctions):
             xbmc.log('kodigui.BaseDialog.setProperty: Missing window', xbmc.LOGDEBUG)
 
     def doClose(self, **kw):
+        _drop_art_prefetch(self)
         plexapp.util.APP.off('close.dialogs', self.onCloseSignal)
         self._closing = True
         self.close()
@@ -568,6 +623,20 @@ class EmptyDataSource(DummyDataSource):
 
 DUMMY_DATA_SOURCE = DummyDataSource()
 
+_ART_PROPS = frozenset((
+    "thumb", "art", "background", "background_static", "clear.logo", "preview",
+))
+
+
+def _watch_art(url):
+    if not url:
+        return
+    try:
+        from lib import timing
+        timing.watch_art(url)
+    except Exception:
+        util.DEBUG_LOG("timing hook failed")
+
 
 class ManagedListItem(object):
     __slots__ = ("_listItem", "dataSource", "properties", "label", "label2", "iconImage", "thumbnailImage", "path",
@@ -576,7 +645,17 @@ class ManagedListItem(object):
     def __init__(self, label='', label2='', iconImage='', thumbnailImage='', path='', data_source=None,
                  properties=None):
         self._listItem = xbmcgui.ListItem(label, label2, path=path)
-        self._listItem.setArt({"thumb": thumbnailImage, "icon": iconImage})
+        shown = thumbnailImage
+        try:
+            from lib import artprefetch
+            shown = artprefetch.resolve(thumbnailImage)
+        except Exception:
+            shown = thumbnailImage
+        self._listItem.setArt({"thumb": shown, "icon": iconImage})
+        # Watch the URL Kodi was given. A prefetched file is local, so it is
+        # not an HTTP image wait. Watching the remote URL instead would time
+        # out, because Kodi never requests it.
+        _watch_art(shown)
         self.dataSource = data_source
         self.properties = {}
         self.label = label
@@ -677,6 +756,9 @@ class ManagedListItem(object):
         return self.listItem.select(selected)
 
     def setArt(self, values):
+        if values:
+            for value in values.values():
+                _watch_art(value)
         return self.listItem.setArt(values)
 
     def setIconImage(self, icon):
@@ -706,6 +788,8 @@ class ManagedListItem(object):
             self._manager._properties[key] = 1
         self.properties[key] = value
         self.listItem.setProperty(key, value)
+        if key in _ART_PROPS:
+            _watch_art(value)
         return self
 
     def setProperties(self, prop_list, val_list_or_val):
@@ -725,6 +809,7 @@ class ManagedListItem(object):
 
     def setThumbnailImage(self, thumb):
         self.thumbnailImage = thumb
+        _watch_art(thumb)
         return self.listItem.setArt({"thumb": self.thumbnailImage})
 
     def onDestroy(self):

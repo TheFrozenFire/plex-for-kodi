@@ -2,6 +2,7 @@
 from __future__ import absolute_import
 
 import gc
+import os
 import atexit
 import threading
 import six
@@ -50,6 +51,29 @@ if util.addonSettings.debugRequests:
     logger.addHandler(KodiLogProxyHandler(level=logging.DEBUG,
                                           log_func=lambda *a, **kw: util.log(*a, prepend_msg="[urllib3]", **kw)))
     logger.setLevel(logging.DEBUG)
+
+
+def _shutdown_added_workers():
+    """Release art prefetch, playback prep, and the timing art watcher.
+
+    Also runs when Kodi sets abortRequested: the main loop leaves and this
+    finally runs, and each worker polls abortRequested on its own wait.
+    """
+    try:
+        from . import artprefetch
+        artprefetch.shutdown()
+    except Exception:
+        util.DEBUG_LOG("Main: art prefetch shutdown failed")
+    try:
+        from . import playbackprep
+        playbackprep.shutdown()
+    except Exception:
+        util.DEBUG_LOG("Main: playback prep shutdown failed")
+    try:
+        from . import timing
+        timing.shutdown()
+    except Exception:
+        util.DEBUG_LOG("Main: timing shutdown failed")
 
 
 def waitForThreads():
@@ -123,6 +147,24 @@ exit_timer = threading.Timer(util.addonSettings.maxShutdownWait, hardExit)
 exit_timer.name = 'HARDEXIT-TIMER'
 
 
+def _log_build_rev():
+    """Log a gitignored build_rev.txt if a deploy script left one next to the addon.
+
+    The addon version stays equal to upstream so the updater can still see a real
+    upgrade. The rev file is how a dev tree identifies itself in the Kodi log.
+    """
+    try:
+        rev_path = os.path.join(util.translatePath(util.ADDON.getAddonInfo('path')), 'build_rev.txt')
+        if not os.path.exists(rev_path):
+            return
+        with open(rev_path, 'r') as handle:
+            rev = handle.read().strip()
+        if rev:
+            util.LOG('Build rev: {0}', rev.splitlines()[0][:80])
+    except Exception:
+        pass
+
+
 def main(force_render=False):
     global BACKGROUND
 
@@ -177,6 +219,7 @@ def _main():
     #pr.enable()
 
     util.DEBUG_LOG('[ STARTED: {0} -------------------------------------------------------------------- ]', util.ADDON.getAddonInfo('version'))
+    _log_build_rev()
     if util.KODI_VERSION_MAJOR > 19 and util.DEBUG and util.getSetting('dump_config'):
         lv = len(util.ADDON.getAddonInfo('version'))
         util.DEBUG_LOG('[ SETTINGS DUMP {0}-------------------------------------------------------------------- '
@@ -367,6 +410,10 @@ def _main():
     finally:
         try:
             util.DEBUG_LOG('Main: SHUTTING DOWN...')
+            # Stop workers this tree added before anything else waits on threads.
+            # Kodi 21 joins every Python thread after the script ends, including
+            # daemons, and a wait without a timeout cannot be interrupted.
+            _shutdown_added_workers()
             dcm.storeDataCache()
             dcm.deinit()
             plexapp.util.INTERFACE.shutdownCache()

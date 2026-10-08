@@ -1,0 +1,24 @@
+name: offline checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install test dependencies
+        run: python -m pip install pytest ruff requests six
+      - name: Byte-compile the add-on
+        run: python -m compileall -q lib tests default.py service.py plugin.py screensaver.py
+      - name: Lint the dev-only modules
+        # The rest of the tree is not style-clean. compileall above is the
+        # syntax check for all of it; ruff only covers code added for the harness.
+        run: python -m ruff check lib/timing.py lib/artprefetch.py lib/playbackprep.py lib/stickysubs.py lib/remoteplay.py lib/hubrefresh.py tests/test_timing.py tests/test_timing_safety.py tests/test_timing_tools.py tests/test_latency.py tests/test_worker_shutdown.py tests/test_sticky_subs.py tests/test_gui_thread.py tests/test_remote_play.py tests/test_hub_refresh.py tools/parse_timings.py tools/crawl_feasibility.py
+      - name: Tests
+        run: python -m pytest
