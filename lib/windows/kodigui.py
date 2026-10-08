@@ -18,6 +18,22 @@ from plexnet import plexapp
 MONITOR = None
 
 
+def _service_script_thread(window):
+    """Record this callback as the event loop, then apply queued GUI work.
+
+    Art prefetch and remote play both wait for this thread. Call it from
+    a window action. A worker must not call it: that would claim the
+    event loop and then paint.
+    """
+    try:
+        from lib import hubrefresh
+        hubrefresh.note_script_thread()
+    except Exception:
+        util.DEBUG_LOG("script thread note failed")
+    _flush_art_prefetch(window)
+    _drain_remote_play()
+
+
 def _flush_art_prefetch(window):
     token = getattr(window, "_art_token", None)
     if token is None:
@@ -310,8 +326,7 @@ class BaseWindow(XMLBase, xbmcgui.WindowXML, BaseFunctions):
             self.doClose()
 
     def onAction(self, action):
-        _flush_art_prefetch(self)
-        _drain_remote_play()
+        _service_script_thread(self)
         if XMLBase.goHomeAction(self, action):
             return
         xbmcgui.WindowXML.onAction(self, action)
@@ -494,8 +509,7 @@ class BaseDialog(XMLBase, xbmcgui.WindowXMLDialog, BaseFunctions):
             self.onFirstInit()
 
     def onAction(self, action):
-        _flush_art_prefetch(self)
-        _drain_remote_play()
+        _service_script_thread(self)
         if XMLBase.goHomeAction(self, action):
             return
         xbmcgui.WindowXMLDialog.onAction(self, action)

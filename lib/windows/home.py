@@ -2666,6 +2666,13 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
 
     def onAction(self, action):
         self._note_script_thread()
+        # A noop from cron or remote play is an action, and so is a key
+        # this window consumes before the base handler. Apply queued GUI
+        # work before either of those returns.
+        try:
+            kodigui._service_script_thread(self)
+        except Exception:
+            util.DEBUG_LOG("Home: script thread service failed")
         controlID = self.getFocusId()
         if not self._shuttingDown:
             try:
@@ -2859,6 +2866,10 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
 
     def onClick(self, controlID):
         self._note_script_thread()
+        try:
+            kodigui._service_script_thread(self)
+        except Exception:
+            util.DEBUG_LOG("Home: script thread service failed")
         # A hub click is navigation. Record it before a queued reorder can
         # replace the row this click is about to open.
         if not self._ignoreInput and 399 < controlID < 500:
@@ -2894,6 +2905,10 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
 
     def onFocus(self, controlID):
         self._note_script_thread()
+        try:
+            kodigui._service_script_thread(self)
+        except Exception:
+            util.DEBUG_LOG("Home: script thread service failed")
         # within the 150ms hold window after go_root, any non-section-list focus event is the
         # stray Kodi fires when HOME reactivates with its previously-focused control still
         # recorded. Snap it back and consume the deadline so user input (which arrives well

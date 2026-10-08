@@ -3,9 +3,10 @@
 
 Downloads run on a few background threads into a small file cache under the
 add-on profile. Those threads only write files. A list item is pointed at the
-file later, on the GUI thread, and only while that window generation and the
-item are still alive. Off unless ``prefetch_art`` is turned off; the setting
-defaults on.
+file later, on the add-on event-loop thread, and only while that window
+generation and the item are still alive. That thread is recorded by a window
+callback. Until then, and on any other thread, nothing touches the list item.
+The setting defaults on.
 
 The cache key is a hash of the URL. The URL itself is never used as a
 filename and is not logged.
@@ -223,7 +224,14 @@ def drop_generation(generation):
 
 
 def _on_gui_thread():
-    return threading.current_thread() is threading.main_thread()
+    """True only on the recorded window event-loop thread.
+
+    Kodi does not run the add-on script as Python's main thread. Unknown
+    is not that thread, so a worker cannot apply a list item by arriving
+    before the event loop has been seen.
+    """
+    from lib import hubrefresh
+    return hubrefresh.on_script_thread()
 
 
 def _alive(item):

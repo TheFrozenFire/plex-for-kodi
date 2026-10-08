@@ -6,11 +6,12 @@ import ast
 import json
 import os
 import threading
+import traceback
 
 import xbmcgui
 from kodienv import ENV
 
-from lib import remoteplay
+from lib import hubrefresh, remoteplay
 
 from .base import KodiTestCase, REPO_ROOT
 
@@ -74,6 +75,10 @@ class RemotePlayTest(KodiTestCase):
     def setUp(self):
         super(RemotePlayTest, self).setUp()
         remoteplay._reset_for_tests()
+        # These cases call submit on the pytest thread. That thread is the
+        # event loop for them. A background request still waits for drain.
+        hubrefresh.reset()
+        hubrefresh.note_script_thread()
         self.opened = []
         self.stopped = []
         self.woken = []
@@ -95,6 +100,7 @@ class RemotePlayTest(KodiTestCase):
 
     def tearDown(self):
         remoteplay._reset_for_tests()
+        hubrefresh.reset()
         super(RemotePlayTest, self).tearDown()
 
     def _stop(self):
@@ -255,8 +261,112 @@ class RemotePlayTest(KodiTestCase):
         self.assertFalse(seen)
         self.assertTrue(self.poked)
         remoteplay.drain()
-        self.assertEqual([threading.main_thread()], seen)
+        self.assertEqual([threading.current_thread()], seen)
         self.assertTrue(self._result()["ok"])
+
+    def test_non_main_script_thread_drains_on_the_next_action(self):
+        errors = []
+
+        def runner():
+            try:
+                self._drain_on_script_thread()
+            except Exception:
+                errors.append(traceback.format_exc())
+
+        worker = threading.Thread(target=runner)
+        worker.start()
+        worker.join(5)
+        self.assertFalse(worker.is_alive(), "script runner did not finish")
+        self.assertFalse(errors, errors)
+
+    def _drain_on_script_thread(self):
+        hubrefresh.reset()
+        remoteplay._reset_for_tests()
+        self._install_hooks()
+        self.assertIsNot(threading.current_thread(), threading.main_thread())
+        self.assertFalse(hubrefresh.on_script_thread())
+        self.fetched["item"] = _Item("episode", "12345")
+        seen = []
+        remoteplay._HOOKS["open"] = lambda item, request: seen.append(threading.current_thread())
+        worker_errors = []
+
+        def pool():
+            try:
+                remoteplay.accept_notification('{"ratingKey":"12345","id":"bg-loop"}')
+                if hubrefresh.on_script_thread():
+                    worker_errors.append("worker claimed the event loop")
+            except Exception:
+                worker_errors.append(traceback.format_exc())
+
+        pool_thread = threading.Thread(target=pool)
+        pool_thread.start()
+        pool_thread.join(2)
+        self.assertFalse(pool_thread.is_alive())
+        self.assertFalse(worker_errors, worker_errors)
+        self.assertFalse(seen)
+        self.assertFalse(hubrefresh.on_script_thread())
+        self.assertTrue(self.poked)
+        # Calling drain off the recorded thread must not open playback.
+        remoteplay.drain()
+        self.assertFalse(seen)
+
+        from lib.windows import kodigui
+        window = type("Win", (), {"_art_token": None})()
+        kodigui._service_script_thread(window)
+        self.assertTrue(hubrefresh.on_script_thread())
+        self.assertEqual([threading.current_thread()], seen)
+        self.assertIsNot(seen[0], threading.main_thread())
+        self.assertTrue(self._result()["ok"])
+
+    def _install_hooks(self):
+        remoteplay._HOOKS["ready"] = lambda: True
+        remoteplay._HOOKS["wake"] = lambda: self.woken.append(1)
+        remoteplay._HOOKS["dismiss"] = lambda: None
+        remoteplay._HOOKS["poke"] = lambda: self.poked.append(1)
+        remoteplay._HOOKS["playing"] = lambda: self.playing
+        remoteplay._HOOKS["stop"] = self._stop
+        remoteplay._HOOKS["sleep"] = lambda: True
+        remoteplay._HOOKS["open"] = lambda item, request: self.opened.append((item, request))
+        remoteplay._HOOKS["manager"] = lambda: _Manager([self.server, self.other], self.server)
+        remoteplay._HOOKS["fetch"] = self._fetch
+
+    def test_window_action_records_the_event_loop_before_gui_work(self):
+        source = self._source("lib", "windows", "kodigui.py")
+        tree = ast.parse(source, filename="lib/windows/kodigui.py")
+        found = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_service_script_thread":
+                found["_service_script_thread"] = node
+            if isinstance(node, ast.ClassDef) and node.name in ("BaseWindow", "BaseDialog"):
+                for child in node.body:
+                    if isinstance(child, ast.FunctionDef) and child.name == "onAction":
+                        found["{0}.onAction".format(node.name)] = child
+
+        def calls(node):
+            names = []
+            for child in ast.walk(node):
+                if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute):
+                    names.append(child.func.attr)
+                elif isinstance(child, ast.Call) and isinstance(child.func, ast.Name):
+                    names.append(child.func.id)
+            return names
+
+        service = calls(found["_service_script_thread"])
+        self.assertIn("note_script_thread", service)
+        self.assertIn("_flush_art_prefetch", service)
+        self.assertIn("_drain_remote_play", service)
+        for name in ("BaseWindow.onAction", "BaseDialog.onAction"):
+            self.assertIn("_service_script_thread", calls(found[name]), name)
+        home = ast.parse(self._source("lib", "windows", "home.py"), filename="lib/windows/home.py")
+        home_actions = []
+        for node in ast.walk(home):
+            if isinstance(node, ast.ClassDef) and node.name == "HomeWindow":
+                for child in node.body:
+                    if isinstance(child, ast.FunctionDef) and child.name in ("onAction", "onFocus", "onClick"):
+                        home_actions.append(calls(child))
+        self.assertEqual(len(home_actions), 3)
+        for names in home_actions:
+            self.assertIn("_service_script_thread", names)
 
     def test_handoff_forwards_when_running_and_reports_when_not(self):
         remoteplay._HOOKS["running"] = lambda: True

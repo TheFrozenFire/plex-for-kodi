@@ -5,9 +5,9 @@ The running add-on listens for ``Other.PM4K_PLAY`` (``JSONRPC.NotifyAll``).
 A second ``RunScript`` / ``Addons.ExecuteAddon`` invocation only forwards that
 announcement and exits, so it does not open another UI.
 
-Workers are not used. The script thread (the one inside ``doModal``) resolves
-the item and calls the normal play path. A request that arrives off that
-thread is queued until the next window action.
+Workers are not used. The script thread is the window event loop, not
+Python's main thread. A request that arrives elsewhere stays queued until
+the next window action, which records that thread and then plays.
 """
 from __future__ import absolute_import
 
@@ -493,10 +493,15 @@ def _instance_running():
 
 
 def _on_gui_thread():
+    """True only on the recorded window event-loop thread.
+
+    Unknown is not that thread. A test may replace this with ``_HOOKS``.
+    """
     hook = _HOOKS.get("on_gui")
     if hook is not None:
         return bool(hook()) if callable(hook) else bool(hook)
-    return threading.current_thread() is threading.main_thread()
+    from lib import hubrefresh
+    return hubrefresh.on_script_thread()
 
 
 def _notify_instance(request):

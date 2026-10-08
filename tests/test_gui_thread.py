@@ -3,7 +3,8 @@
 
 A list item method from a worker thread is what crashed Kodi while a window
 was closing. Workers may write a file or a dict. Applying that to a list item
-stays on the main thread, and only for the generation that is still current.
+stays on the add-on event-loop thread, and only for the generation that is
+still current. That thread is not Python's main thread under Kodi.
 """
 from __future__ import absolute_import
 
@@ -11,8 +12,9 @@ import ast
 import os
 import tempfile
 import threading
+import traceback
 
-from lib import artprefetch, playbackprep, stickysubs, timing
+from lib import artprefetch, hubrefresh, playbackprep, stickysubs, timing
 
 from .base import KodiTestCase, REPO_ROOT
 
@@ -59,7 +61,7 @@ class _Item(object):
         self.updated = []
 
     def setThumbnailImage(self, path):
-        if threading.current_thread() is not threading.main_thread():
+        if not hubrefresh.on_script_thread():
             raise RuntimeError("list item updated off the GUI thread")
         self.thumbnailImage = path
         self.updated.append(path)
@@ -67,7 +69,7 @@ class _Item(object):
 
 def _guard_listitem(method):
     def wrapped(*args, **kwargs):
-        if threading.current_thread() is not threading.main_thread():
+        if not hubrefresh.on_script_thread():
             raise RuntimeError("xbmcgui.{0} off the GUI thread".format(method))
         return None
     return wrapped
@@ -79,9 +81,14 @@ class GuiThreadTest(KodiTestCase):
         self._dir = tempfile.mkdtemp()
         os.environ["PM4K_ART_CACHE"] = self._dir
         artprefetch._reset_for_tests()
+        # Existing cases call bind and flush on the pytest thread. That
+        # thread is the event loop for those cases.
+        hubrefresh.reset()
+        hubrefresh.note_script_thread()
 
     def tearDown(self):
         artprefetch._reset_for_tests()
+        hubrefresh.reset()
         os.environ.pop("PM4K_ART_CACHE", None)
         super(GuiThreadTest, self).tearDown()
 
@@ -169,3 +176,89 @@ class GuiThreadTest(KodiTestCase):
         self.assertTrue(callable(playbackprep._worker))
         self.assertTrue(callable(stickysubs.apply))
         self.assertTrue(callable(timing._art_loop))
+
+    def test_non_main_script_thread_applies_cached_art(self):
+        errors = []
+
+        def runner():
+            try:
+                self._apply_on_script_thread()
+            except Exception:
+                errors.append(traceback.format_exc())
+
+        worker = threading.Thread(target=runner)
+        worker.start()
+        worker.join(5)
+        self.assertFalse(worker.is_alive(), "script runner did not finish")
+        self.assertFalse(errors, errors)
+
+    def _apply_on_script_thread(self):
+        hubrefresh.reset()
+        self.assertIsNot(threading.current_thread(), threading.main_thread())
+        self.assertFalse(hubrefresh.on_script_thread())
+        url = "https://example.test/photo/event-loop"
+        path = artprefetch.path_for(url)
+        with open(path, "wb") as handle:
+            handle.write(b"img")
+        item = _Item(url)
+        generation = object()
+        # Unknown is not the event loop, so this thread cannot paint yet.
+        artprefetch.bind([item], generation)
+        artprefetch.flush(generation)
+        self.assertEqual(item.updated, [])
+        self.assertFalse(artprefetch._pending)
+
+        worker_errors = []
+
+        def pool():
+            try:
+                artprefetch._store_ready(url, path)
+                artprefetch.bind([item], generation)
+                artprefetch.flush(generation)
+                if hubrefresh.on_script_thread():
+                    worker_errors.append("worker claimed the event loop")
+            except Exception:
+                worker_errors.append(traceback.format_exc())
+
+        pool_thread = threading.Thread(target=pool, name="pm4k-art-test")
+        pool_thread.start()
+        pool_thread.join(2)
+        self.assertFalse(pool_thread.is_alive())
+        self.assertFalse(worker_errors, worker_errors)
+        self.assertEqual(item.updated, [])
+        self.assertFalse(hubrefresh.on_script_thread())
+
+        from lib.windows import kodigui
+        window = type("Win", (), {"_art_token": generation})()
+        kodigui._service_script_thread(window)
+        self.assertTrue(hubrefresh.on_script_thread())
+        self.assertIsNot(threading.current_thread(), threading.main_thread())
+        # The file is ready, so the event loop can point the item at it.
+        artprefetch.bind([item], generation)
+        self.assertEqual(item.updated, [path])
+
+        # A row recorded here waits for the next tick. The worker must not apply it.
+        waiting = _Item(url)
+        artprefetch._ready.pop(url, None)
+        artprefetch.bind([waiting], generation)
+        self.assertEqual(waiting.updated, [])
+        self.assertTrue(artprefetch._pending)
+
+        def pool_again():
+            try:
+                artprefetch._store_ready(url, path)
+                artprefetch.flush(generation)
+                if hubrefresh.on_script_thread():
+                    worker_errors.append("worker claimed the event loop")
+            except Exception:
+                worker_errors.append(traceback.format_exc())
+
+        again = threading.Thread(target=pool_again, name="pm4k-art-test")
+        again.start()
+        again.join(2)
+        self.assertFalse(again.is_alive())
+        self.assertFalse(worker_errors, worker_errors)
+        self.assertEqual(waiting.updated, [])
+        kodigui._service_script_thread(window)
+        self.assertEqual(waiting.updated, [path])
+        self.assertFalse(artprefetch._pending)
