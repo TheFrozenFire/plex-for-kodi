@@ -10,6 +10,9 @@ is worse, and there is no second acknowledgement to wait for.
 The rest of the hubs start ``REST_DELAY`` seconds after that read is
 allowed, so new movies and episodes show up without another five-minute
 wait. Continue Watching is not part of that second pass.
+
+A later watch always arms another refresh. There is no minimum watch
+length: a short play can still change On Deck and Continue Watching.
 """
 from __future__ import absolute_import
 
@@ -86,6 +89,23 @@ def decide(changed, focused, navigated):
     return "apply"
 
 
+def note_playback_started():
+    """A new watch. The previous stop must not block the next refresh."""
+    global _cw_started
+    with _LOCK:
+        _cw_started = False
+
+
+def refresh_block():
+    """Why a session end would not start a refresh, or None if it would."""
+    with _LOCK:
+        if _pending is not None:
+            return "timeline-inflight"
+        if _cw_started:
+            return "already-started"
+        return None
+
+
 def note_stop_sent():
     """A video ``state=stopped`` timeline was handed to the network.
 
@@ -117,11 +137,19 @@ def note_stop_acked(token, now=None):
 
 
 def note_session_end(now=None):
-    """Video session ended. Start immediately only when no timeline is in flight."""
-    global _cw_started, _rest_at
+    """Video session ended. Start when this stop did not send a timeline.
+
+    A timeline already in flight owns the refresh (its ack starts the
+    read). A stop that never sends one — the server still has this item
+    as stopped, or playback state never changed — still has to refresh.
+    The previous stop's one-shot flag does not apply after a new watch.
+    Starting here bumps the generation so an older read cannot paint.
+    """
+    global _generation, _cw_started, _rest_at
     with _LOCK:
         if _pending is not None or _cw_started:
             return False
+        _generation += 1
         _cw_started = True
         moment = time.monotonic() if now is None else now
         _rest_at = moment + REST_DELAY

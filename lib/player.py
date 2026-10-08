@@ -779,6 +779,11 @@ class SeekPlayerHandler(BasePlayerHandler):
                 self.pbStartedRemoved = True
 
         self.player.trigger('started.video')
+        try:
+            from lib import hubrefresh
+            hubrefresh.note_playback_started()
+        except Exception:
+            util.DEBUG_LOG("Hub refresh: playback arm failed")
 
         # fixme: move below embedded subtitle check?
         if self.isDirectPlay:
@@ -864,6 +869,13 @@ class SeekPlayerHandler(BasePlayerHandler):
 
     def onPlayBackStarted(self):
         util.DEBUG_LOG('SeekHandler: onPlayBackStarted, DP: {}', self.isDirectPlay)
+        # Arm the next home refresh as soon as video starts. A short watch
+        # still changes On Deck, and the previous stop must not swallow it.
+        try:
+            from lib import hubrefresh
+            hubrefresh.note_playback_started()
+        except Exception:
+            util.DEBUG_LOG("Hub refresh: playback arm failed")
 
         self.updateNowPlaying(refreshQueue=True)
 
@@ -3192,6 +3204,19 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
             timing.play_phase(getattr(self, "_pb_span", None), "playing")
         except Exception:
             util.DEBUG_LOG("Player: timing hook failed")
+        try:
+            video = bool(self.isPlayingVideo())
+        except Exception:
+            video = False
+        handler = self.handler
+        if not video and handler is not None and getattr(handler, "timelineType", None) == "video":
+            video = True
+        if video:
+            try:
+                from lib import hubrefresh
+                hubrefresh.note_playback_started()
+            except Exception:
+                util.DEBUG_LOG("Hub refresh: playback arm failed")
         if not self.handler:
             return
         self.handler.onPlayBackStarted()
