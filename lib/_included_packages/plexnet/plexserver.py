@@ -144,7 +144,7 @@ class PlexServer(plexresource.PlexResource, signalsmixin.SignalsMixin):
     def getPrefs(self):
         return plexobjects.listItems(self, "/:/prefs", bytag=True, cachable=False, not_cachable=True)
 
-    def hubs(self, section=None, count=None, search_query=None, section_ids=None):
+    def hubs(self, section=None, count=None, search_query=None, section_ids=None, skip_continue=False):
         hubs = []
 
         params = {"includeMarkers": 1}
@@ -185,7 +185,9 @@ class PlexServer(plexresource.PlexResource, signalsmixin.SignalsMixin):
         newCW = util.INTERFACE.getPreference('hubs_use_new_continue_watching', False) and not search_query \
             and not section
 
-        if newCW:
+        # The post-playback pass already reloaded Continue Watching on its own.
+        # Skip the second round trip so this response cannot replace that row.
+        if newCW and not skip_continue:
             cq = '/hubs/continueWatching'
             if section_ids:
                 cq += util.joinArgs(params)

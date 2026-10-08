@@ -12,6 +12,7 @@ from plexnet import plexapp, plexlibrary, plexresource
 from six.moves import range
 
 from lib import backgroundthread
+from lib import hubrefresh
 from lib import player
 from lib import timing
 from lib import util
@@ -69,11 +70,12 @@ class HubsList(list):
 
 
 class SectionHubsTask(backgroundthread.Task):
-    def setup(self, section, callback, section_keys=None, reselect_pos_dict=None):
+    def setup(self, section, callback, section_keys=None, reselect_pos_dict=None, skip_continue=False):
         self.section = section
         self.callback = callback
         self.section_keys = section_keys
         self.reselect_pos_dict = reselect_pos_dict
+        self.skip_continue = skip_continue
         return self
 
     def run(self):
@@ -86,7 +88,8 @@ class SectionHubsTask(backgroundthread.Task):
 
         try:
             hubs = HubsList(self.section.server.hubs(self.section.key, count=HUB_PAGE_SIZE,
-                                                                      section_ids=self.section_keys)).init()
+                                                                      section_ids=self.section_keys,
+                                                                      skip_continue=self.skip_continue)).init()
             hubs.identifier = self.section.key
             if self.isCanceled():
                 return
@@ -180,6 +183,63 @@ class PathMappingProbeTask(backgroundthread.Task):
 
         if changed:
             self.callback()
+
+
+class ContinueRefreshTask(backgroundthread.Task):
+    """Reload Continue Watching / On Deck only. No list-item or window calls."""
+
+    def setup(self, hubs, generation, callback):
+        self.hubs = list(hubs)
+        self.generation = generation
+        self.callback = callback
+        return self
+
+    def run(self):
+        if self.isCanceled():
+            return
+
+        loaded = []
+        for hub in self.hubs:
+            if self.isCanceled():
+                return
+            try:
+                hub.reload(limit=HUB_PAGE_SIZE)
+                loaded.append(hub)
+            except Exception:
+                util.DEBUG_LOG("Hub refresh: continue reload failed")
+
+        span = getattr(self, "_hub_span", None)
+        try:
+            timing.mark(span, "cw.end")
+        except Exception:
+            util.DEBUG_LOG("Hub refresh: timing hook failed")
+
+        if self.isCanceled():
+            return
+        self.callback(loaded, self.generation)
+
+
+class RemainingHubTask(backgroundthread.Task):
+    """Reload one non-continue hub. No list-item or window calls."""
+
+    def setup(self, hub, generation, callback):
+        self.hub = hub
+        self.generation = generation
+        self.callback = callback
+        return self
+
+    def run(self):
+        loaded = None
+        try:
+            if not self.isCanceled():
+                self.hub.reload(limit=HUB_PAGE_SIZE)
+                loaded = self.hub
+        except Exception:
+            util.DEBUG_LOG("Hub refresh: remaining hub reload failed")
+            loaded = None
+        if self.isCanceled():
+            loaded = None
+        self.callback(loaded, self.generation)
 
 
 class UpdateHubTask(backgroundthread.Task):
@@ -699,6 +759,27 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         self._restarting = False
         self._anyItemAction = False
         self._odHubsDirty = False
+        # Post-playback hub refresh. The fast pass reloads Continue Watching
+        # after the stopped timeline returns. The follow-up pass refreshes
+        # every other row a couple of seconds later and does not touch the
+        # continue row again. A row the user has already moved on is held
+        # until focus leaves it. ``_navSinceReturn`` is cleared when home
+        # comes back, so the first paint can update the focused row in place.
+        self._navSinceReturn = False
+        self._suspendHubNav = False
+        self._deferredHubs = {}
+        self._pendingContinue = None
+        self._restReady = []
+        self._restLeft = 0
+        self._restBatch = None
+        self._restDrawOnGui = False
+        self._preserveContinueRows = False
+        self._restSectionKey = None
+        self._restSectionReady = False
+        self._restApplied = False
+        self._continueDone = False
+        self._hubRefreshSpan = None
+        self._hubApplyLock = threading.Lock()
         self._updateSourceChanged = False
         self.librarySettings = None
         self.hubSettings = None
@@ -807,6 +888,19 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         if self._ignoreReInit or time.time() < self._goRootHoldUntil:
             return
 
+        # Focus restore fires onFocus. That is not the user moving.
+        self._suspendHubNav = True
+        self._navSinceReturn = False
+        try:
+            self._onReInitBody()
+        finally:
+            self._suspendHubNav = False
+            try:
+                self._drain_hub_refresh()
+            except Exception:
+                util.DEBUG_LOG("Hub refresh: drain failed")
+
+    def _onReInitBody(self):
         if player.PLAYER.bgmPlaying:
             player.PLAYER.stopAndWait(fade=util.addonSettings.themeMusicFade, deferred=True)
 
@@ -2258,10 +2352,10 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                             if self._pendingCrossSources == 0:
                                 home_hubs = self.sectionHubs.get(None)
                                 if home_hubs is not None:
-                                    self.showHubs(self.lastSection, update=bool(home_hubs))
+                                    self._show_hubs_or_defer(self.lastSection, update=bool(home_hubs))
                             # else: wait for remaining sources
                         else:
-                            self.showHubs(self.lastSection, update=False)
+                            self._show_hubs_or_defer(self.lastSection, update=False)
         except Exception:
             util.ERROR("Error in crossSectionHubsCallback")
 
@@ -2332,6 +2426,8 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         plexapp.util.APP.on('theme_relevant_setting', self.setThemeDirty)
 
         player.PLAYER.on('session.ended', self.updateOnDeckHubs)
+        plexapp.util.APP.on('np:timelineStopSent', self.onTimelineStopSent)
+        plexapp.util.APP.on('np:timelineStopped', self.onTimelineStopped)
         util.MONITOR.on('changed.watchstatus', self.updateOnDeckHubs)
         util.MONITOR.on('screensaver.activated', self.disableUpdates)
         util.MONITOR.on('screensaver.deactivated', self.refreshLastSection)
@@ -2364,6 +2460,8 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         plexapp.util.APP.off('theme_relevant_setting', self.setThemeDirty)
 
         player.PLAYER.off('session.ended', self.updateOnDeckHubs)
+        plexapp.util.APP.off('np:timelineStopSent', self.onTimelineStopSent)
+        plexapp.util.APP.off('np:timelineStopped', self.onTimelineStopped)
         util.MONITOR.off('changed.watchstatus', self.updateOnDeckHubs)
         util.MONITOR.off('screensaver.activated', self.disableUpdates)
         util.MONITOR.off('screensaver.deactivated', self.refreshLastSection)
@@ -2421,6 +2519,13 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         if self._shuttingDown:
             util.DEBUG_LOG("Home: Not ticking, shutdown flag set")
             return
+
+        # Cron already exists. It only notices that the follow-up hub refresh
+        # is due; the fetch itself goes to the shared pool.
+        try:
+            self._poll_rest_refresh()
+        except Exception:
+            util.DEBUG_LOG("Hub refresh: rest poll failed")
 
         if self.movingSection:
             util.DEBUG_LOG("Home: Not ticking, currently moving a section")
@@ -2483,6 +2588,12 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         util.DEBUG_LOG("Home: shutdown called")
         self._shuttingDown = True
         self._ignoreTick = True
+        self._cancel_playback_refresh_tasks()
+        self._finish_hub_span()
+        try:
+            hubrefresh.reset()
+        except Exception:
+            util.DEBUG_LOG("Hub refresh: reset failed")
         self.stopRetryingRequests()
         try:
             self.serverList.reset()
@@ -2528,6 +2639,12 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
 
     def onAction(self, action):
         controlID = self.getFocusId()
+        if not self._shuttingDown:
+            try:
+                self._note_hub_navigation(action, controlID)
+                self._drain_hub_refresh()
+            except Exception:
+                util.DEBUG_LOG("Hub refresh: drain failed")
         if self._ignoreInput or self._shuttingDown:
             return
 
@@ -2734,6 +2851,9 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
         elif controlID == self.PLAYER_STATUS_BUTTON_ID:
             self.showAudioPlayer()
         elif 399 < controlID < 500:
+            # Select opens the row that is on screen now. A pending reorder
+            # waits until focus leaves, so it cannot land under this click.
+            self._navSinceReturn = True
             self.hubItemClicked(controlID)
         elif controlID == self.SEARCH_BUTTON_ID:
             self.searchButtonClicked()
@@ -2748,6 +2868,14 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             self._goRootHoldUntil = 0
             self.setFocusId(self.SECTION_LIST_ID)
             return
+
+        previous = self.lastFocusID
+        if (not self._suspendHubNav and previous and previous != controlID and 399 < previous < 500):
+            self._navSinceReturn = True
+            try:
+                self._release_deferred_hub(previous)
+            except Exception:
+                util.DEBUG_LOG("Hub refresh: deferred apply failed")
 
         if controlID != 204 and controlID < 500:
             # don't store focus for mini music player
@@ -2767,6 +2895,11 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             util.setGlobalBoolProperty('off.sections', '')
         elif controlID != 250 and xbmc.getCondVisibility('ControlGroup(50).HasFocus(0) + !ControlGroup(100).HasFocus(0)'):
             util.setGlobalBoolProperty('off.sections', '1')
+
+        try:
+            self._drain_hub_refresh()
+        except Exception:
+            util.DEBUG_LOG("Hub refresh: drain failed")
 
     def goHome(self, **kwargs):
         self.setProperty('hub.focus', '')
@@ -2833,8 +2966,447 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
     def searchButtonClicked(self):
         self.processCommand(search.dialog(self))
 
-    def updateOnDeckHubs(self, **kwargs):
+    def updateOnDeckHubs(self, session_id=None, **kwargs):
+        # Video session end owns the refresh. A watch-status change from
+        # another screen still uses the dirty flag, as before.
+        if session_id is not None:
+            self._odHubsDirty = False
+            try:
+                if hubrefresh.note_session_end():
+                    self._ensure_hub_span()
+                    self._start_continue_refresh()
+            except Exception:
+                util.DEBUG_LOG("Hub refresh: session hook failed")
+            return
         self._odHubsDirty = True
+
+    def onTimelineStopSent(self, context=None, **kwargs):
+        try:
+            token = hubrefresh.note_stop_sent()
+            if context is not None:
+                context.awaitHubRefresh = token
+            self._cancel_playback_refresh_tasks()
+            self._deferredHubs = {}
+            self._pendingContinue = None
+            self._restReady = []
+            self._restLeft = 0
+            self._restBatch = None
+            self._restDrawOnGui = False
+            self._preserveContinueRows = False
+            self._restSectionReady = False
+            self._restApplied = False
+            self._continueDone = False
+            self._mark_hub_refresh("stop", begin=True)
+        except Exception:
+            util.DEBUG_LOG("Hub refresh: stop hook failed")
+
+    def onTimelineStopped(self, token=None, **kwargs):
+        try:
+            if hubrefresh.note_stop_acked(token):
+                self._start_continue_refresh()
+        except Exception:
+            util.DEBUG_LOG("Hub refresh: ack hook failed")
+
+    def _ensure_hub_span(self):
+        if getattr(self, "_hubRefreshSpan", None) is not None:
+            return
+        self._mark_hub_refresh("stop", begin=True)
+
+    def _mark_hub_refresh(self, phase, begin=False):
+        try:
+            if begin or getattr(self, "_hubRefreshSpan", None) is None:
+                previous = getattr(self, "_hubRefreshSpan", None)
+                if previous is not None:
+                    timing.finish(previous)
+                opened = timing.begin("hub.refresh")
+                timing.pause_span(opened)
+                self._hubRefreshSpan = opened
+            timing.mark(self._hubRefreshSpan, phase)
+        except Exception:
+            util.DEBUG_LOG("Hub refresh: timing hook failed")
+
+    def _finish_hub_span(self):
+        span = getattr(self, "_hubRefreshSpan", None)
+        self._hubRefreshSpan = None
+        if span is None:
+            return
+        try:
+            timing.finish(span)
+        except Exception:
+            util.DEBUG_LOG("Hub refresh: timing hook failed")
+
+    def _cancel_playback_refresh_tasks(self):
+        for task in self.tasks:
+            if isinstance(task, (ContinueRefreshTask, RemainingHubTask)) and not task.finished:
+                task.cancel()
+
+    def _start_continue_refresh(self):
+        if self._shuttingDown or getattr(self, "_closing", False):
+            return
+        self._ensure_hub_span()
+        with self.lock:
+            hubs = [hub for ident, hub in self.updateHubs.items() if hubrefresh.is_continue_hub(ident)]
+        self._mark_hub_refresh("cw.start")
+        if not hubs:
+            self._mark_hub_refresh("cw.end")
+            self._continueDone = True
+            self._maybe_finish_hub_span()
+            return
+        generation = hubrefresh.current_generation()
+        task = ContinueRefreshTask().setup(hubs, generation, self._on_continue_reloaded)
+        task._hub_span = self._hubRefreshSpan
+        self.tasks.append(task)
+        backgroundthread.BGThreader.addTask(task)
+
+    def _on_continue_reloaded(self, hubs, generation):
+        # Worker thread. Store the hubs and let the script thread paint them.
+        if not hubrefresh.same_generation(generation):
+            return
+        if self._shuttingDown or getattr(self, "_closing", False):
+            return
+        with self._hubApplyLock:
+            self._pendingContinue = (generation, hubs)
+        self._poke_hub_apply()
+
+    def _poll_rest_refresh(self):
+        if self._shuttingDown or getattr(self, "_closing", False):
+            return
+        if not hubrefresh.rest_due():
+            return
+        self._start_rest_refresh()
+
+    def _start_rest_refresh(self):
+        if self._shuttingDown or getattr(self, "_closing", False) or not self.lastSection:
+            self._mark_hub_refresh("rest.end")
+            self._mark_hub_refresh("rest.applied")
+            self._restApplied = True
+            self._maybe_finish_hub_span()
+            return
+        self._mark_hub_refresh("rest.start")
+        self._restBatch = hubrefresh.current_generation()
+        self._restApplied = False
+        self._restSectionReady = False
+        with self.lock:
+            cached = self.sectionHubs.get(self.lastSection.key)
+            # A watch longer than five minutes leaves the section stale: tick will
+            # not refresh while video is playing. That takes the full section fetch.
+            stale = cached is not None and time.time() - cached.lastUpdated > HUBS_REFRESH_INTERVAL
+            pending = [] if stale else [
+                hub for ident, hub in self.updateHubs.items() if not hubrefresh.is_continue_hub(ident)]
+        if stale:
+            # Queue only. Painting waits until the script thread drains, and
+            # this fetch does not include a second Continue Watching request.
+            self._restDrawOnGui = True
+            self._preserveContinueRows = True
+            self._restSectionKey = self.lastSection.key
+            cached.lastUpdated = time.time()
+            for task in self.tasks:
+                if isinstance(task, UpdateHubTask) and not task.finished:
+                    task.cancel()
+            self.cleanTasks()
+            task = SectionHubsTask().setup(
+                self.lastSection, self.sectionHubsCallback, self.wantedSections, skip_continue=True)
+            self.tasks.append(task)
+            self._queueHubTask(task)
+            self._refreshCrossSectionSources(self.lastSection.key)
+            return
+        if not pending:
+            self._mark_hub_refresh("rest.end")
+            self._mark_hub_refresh("rest.applied")
+            self._restApplied = True
+            self._maybe_finish_hub_span()
+            return
+        self._restReady = []
+        self._restLeft = len(pending)
+        generation = self._restBatch
+        for hub in pending:
+            task = RemainingHubTask().setup(hub, generation, self._on_rest_hub)
+            self.tasks.append(task)
+            backgroundthread.BGThreader.addTask(task)
+
+    def _on_rest_hub(self, hub, generation):
+        poke = False
+        with self._hubApplyLock:
+            if generation != self._restBatch or not hubrefresh.same_generation(generation):
+                return
+            if hub is not None:
+                self._restReady.append(hub)
+            self._restLeft -= 1
+            poke = self._restLeft <= 0
+        if poke:
+            self._mark_hub_refresh("rest.end")
+            self._poke_hub_apply()
+
+    def _redirect_rest_draw(self):
+        """True when a worker callback must not paint. The script thread will."""
+        if not hubrefresh.same_generation(getattr(self, "_restBatch", None)):
+            return False
+        if not (self._restDrawOnGui or self._restApplied):
+            return False
+        if not self.lastSection or self.lastSection.key != self._restSectionKey:
+            return False
+        return True
+
+    def _queue_rest_draw(self):
+        if not self._redirect_rest_draw():
+            return
+        with self._hubApplyLock:
+            if self._restSectionReady or self._restApplied:
+                return
+            self._restSectionReady = True
+        self._mark_hub_refresh("rest.end")
+        self._poke_hub_apply()
+
+    def _show_hubs_or_defer(self, section, update, reselect_pos_dict=None):
+        if self._redirect_rest_draw():
+            self._queue_rest_draw()
+            return
+        self.showHubs(section, update=update, reselect_pos_dict=reselect_pos_dict)
+
+    def _poke_hub_apply(self):
+        if self._shuttingDown or getattr(self, "_closing", False):
+            return
+        try:
+            xbmc.executebuiltin("Action(noop)")
+        except Exception:
+            util.DEBUG_LOG("Hub refresh: poke failed")
+
+    def _note_hub_navigation(self, action, control_id):
+        if self._suspendHubNav or self._shuttingDown:
+            return
+        if not control_id or not (399 < control_id < 500):
+            return
+        try:
+            action_id = action.getId()
+        except Exception:
+            return
+        # A pointer jitter is not navigation. A click, a move, or Select is.
+        if action_id in (0, getattr(xbmcgui, "ACTION_NOOP", 0), xbmcgui.ACTION_MOUSE_MOVE):
+            return
+        self._navSinceReturn = True
+
+    def _drain_hub_refresh(self):
+        if threading.current_thread() is not threading.main_thread():
+            return
+        if self._shuttingDown or getattr(self, "_closing", False) or not self.hubControls:
+            return
+        with self._hubApplyLock:
+            pending = self._pendingContinue
+            self._pendingContinue = None
+            ready = list(self._restReady)
+            self._restReady = []
+            section_ready = self._restSectionReady
+            self._restSectionReady = False
+        if pending and hubrefresh.same_generation(pending[0]):
+            self._apply_continue_hubs(pending[1])
+        elif pending:
+            util.DEBUG_LOG("Hub refresh: dropped a stale continue result")
+        if ready and hubrefresh.same_generation(self._restBatch):
+            self._apply_rest_hubs(ready)
+        if section_ready and hubrefresh.same_generation(self._restBatch):
+            self._apply_preserved_hubs()
+
+    def _identifier_for_hub(self, hub, section=None):
+        section = section or self.lastSection
+        cross = hub.__dict__.get("_crossSectionSource") if "_crossSectionSource" in hub.__dict__ else "__UNDEF__"
+        if cross != "__UNDEF__":
+            is_home = cross is None
+        else:
+            is_home = bool(section and section.key is None)
+        try:
+            return hub.getCleanHubIdentifier(is_home=is_home), is_home
+        except Exception:
+            return None, is_home
+
+    def _index_for_hub_object(self, hub):
+        if not self.hubControls:
+            return None
+        for index, control in enumerate(self.hubControls):
+            if getattr(control, "dataSource", None) is hub:
+                return index
+        return None
+
+    def _index_for_identifier(self, identifier):
+        if not identifier or not self.hubControls:
+            return None
+        for index, control in enumerate(self.hubControls):
+            current = getattr(control, "dataSource", None)
+            if current is None:
+                continue
+            ident, _is_home = self._identifier_for_hub(current)
+            if ident == identifier:
+                return index
+        return None
+
+    def _row_keys(self, index):
+        if not self.hubControls or index is None or index >= len(self.hubControls):
+            return ()
+        control = self.hubControls[index]
+        keys = []
+        try:
+            rows = list(control)
+        except Exception:
+            return ()
+        for mli in rows:
+            if mli is None:
+                continue
+            try:
+                if mli.getProperty("is.end") == "1":
+                    continue
+            except Exception:
+                pass
+            source = getattr(mli, "dataSource", None)
+            rk = getattr(source, "ratingKey", None) if source is not None else None
+            if rk:
+                keys.append(str(rk))
+        return tuple(keys)
+
+    def _hold_focused_hub(self, index, hub):
+        try:
+            focus = self.getFocusId()
+        except Exception:
+            return False
+        focused = focus == index + 400
+        changed = hubrefresh.order_changed(self._row_keys(index), hubrefresh.item_keys(getattr(hub, "items", None)))
+        return hubrefresh.decide(changed, focused, self._navSinceReturn) == "defer"
+
+    def _apply_hub_in_place(self, hub, index, source):
+        """Replace one row without moving the highlight to a different slot."""
+        if index is None or not self.hubControls or index >= len(self.hubControls):
+            return "gone"
+        if getattr(self, "_closing", False) or self._shuttingDown:
+            return "gone"
+        ident, is_home = self._identifier_for_hub(hub)
+        if self._hold_focused_hub(index, hub):
+            self._deferredHubs[index] = hub
+            self._mark_hub_refresh("cw.deferred" if source == "cw" else "rest.deferred")
+            util.DEBUG_LOG("Hub refresh: holding the focused row")
+            return "defer"
+        self.showHub(hub, is_home=is_home, reselect_pos=None, hub_index=index, pin_index=True)
+        if ident:
+            self.updateHubs[ident] = hub
+        self._mark_hub_refresh("cw.applied" if source == "cw" else "rest.applied")
+        return "apply"
+
+    def _apply_continue_hubs(self, hubs):
+        applied = False
+        for hub in hubs or ():
+            index = self._index_for_hub_object(hub)
+            if index is None:
+                ident, _is_home = self._identifier_for_hub(hub)
+                index = self._index_for_identifier(ident) if ident else None
+            result = self._apply_hub_in_place(hub, index, "cw")
+            if result == "apply":
+                applied = True
+        if not applied and not self._deferredHubs:
+            util.DEBUG_LOG("Hub refresh: continue row was not on screen")
+        self._continueDone = True
+        self._maybe_finish_hub_span()
+
+    def _apply_rest_hubs(self, hubs):
+        for hub in hubs or ():
+            ident, _is_home = self._identifier_for_hub(hub)
+            if ident and hubrefresh.is_continue_hub(ident):
+                continue
+            index = self._index_for_hub_object(hub)
+            if index is None:
+                index = self._index_for_identifier(ident) if ident else None
+            self._apply_hub_in_place(hub, index, "rest")
+        self._restApplied = True
+        self._mark_hub_refresh("rest.applied")
+        self._maybe_finish_hub_span()
+
+    def _maybe_finish_hub_span(self):
+        if self._deferredHubs or not self._continueDone or not self._restApplied:
+            return
+        self._finish_hub_span()
+
+    def _apply_preserved_hubs(self):
+        self._restApplied = True
+        self._restDrawOnGui = False
+        section = self.lastSection
+        combined = None
+        if section is not None:
+            try:
+                combined = self.getCombinedHubsForSection(section)
+            except Exception:
+                util.DEBUG_LOG("Hub refresh: combined hubs failed")
+            if not combined:
+                combined = self.sectionHubs.get(section.key) or []
+        for hub in combined or ():
+            ident, _is_home = self._identifier_for_hub(hub, section)
+            if not ident or hubrefresh.is_continue_hub(ident):
+                continue
+            if not getattr(hub, "items", None):
+                continue
+            self._apply_hub_in_place(hub, self._index_for_identifier(ident), "rest")
+        self._preserveContinueRows = False
+        self._mark_hub_refresh("rest.applied")
+        self._maybe_finish_hub_span()
+
+    def _merge_continue_hubs(self, old_hubs, new_hubs):
+        """Keep the continue rows the fast pass owns inside the stored list."""
+        if not old_hubs or not self._preserveContinueRows:
+            return new_hubs
+        kept = []
+        for hub in old_hubs:
+            ident, _is_home = self._identifier_for_hub(hub)
+            if ident and hubrefresh.is_continue_hub(ident):
+                kept.append((ident, hub))
+        if not kept:
+            return new_hubs
+        present = set()
+        merged = []
+        for hub in new_hubs:
+            ident, _is_home = self._identifier_for_hub(hub)
+            if ident and hubrefresh.is_continue_hub(ident):
+                replacement = None
+                for kid, khub in kept:
+                    if kid == ident:
+                        replacement = khub
+                        present.add(ident)
+                        break
+                merged.append(replacement or hub)
+            else:
+                merged.append(hub)
+        for ident, hub in kept:
+            if ident in present:
+                continue
+            old_index = 0
+            for i, old in enumerate(old_hubs):
+                oid, _is_home = self._identifier_for_hub(old)
+                if oid == ident:
+                    old_index = i
+                    break
+            merged.insert(min(old_index, len(merged)), hub)
+        if isinstance(new_hubs, HubsList):
+            wrapped = HubsList(merged)
+            wrapped.lastUpdated = new_hubs.lastUpdated
+            wrapped.invalid = getattr(new_hubs, "invalid", False)
+            wrapped.identifier = getattr(new_hubs, "identifier", None)
+            return wrapped
+        return merged
+
+    def _release_deferred_hub(self, control_id):
+        if not control_id or not (399 < control_id < 500):
+            return
+        hub = self._deferredHubs.pop(control_id - 400, None)
+        if hub is None:
+            return
+        index = control_id - 400
+        if not self.hubControls or index >= len(self.hubControls):
+            self._maybe_finish_hub_span()
+            return
+        ident, is_home = self._identifier_for_hub(hub)
+        try:
+            self.showHub(hub, is_home=is_home, reselect_pos=None, hub_index=index, pin_index=True)
+            if ident:
+                self.updateHubs[ident] = hub
+            self._mark_hub_refresh("deferred.apply")
+            util.DEBUG_LOG("Hub refresh: applied a held row")
+        except Exception:
+            util.DEBUG_LOG("Hub refresh: deferred apply failed")
+        self._maybe_finish_hub_span()
 
     def _updateOnDeckHubs(self, **kwargs):
         util.DEBUG_LOG('UpdateOnDeckHubs called')
@@ -3809,6 +4381,8 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             sorted_hubs.invalid = hubs.invalid
             sorted_hubs.identifier = hubs.identifier
 
+            if self._preserveContinueRows and self._restSectionKey == section.key:
+                sorted_hubs = self._merge_continue_hubs(self.sectionHubs.get(section.key), sorted_hubs)
             self.sectionHubs[section.key] = sorted_hubs
             self.setBoolProperty('loading.content', False)
 
@@ -3822,18 +4396,18 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                     pending_cross = getattr(self, '_pendingCrossSources', 0)
                     if pending_libs == 0 and pending_cross == 0:
                         # All sources already done, draw now
-                        self.showHubs(section, update=update, reselect_pos_dict=reselect_pos_dict)
+                        self._show_hubs_or_defer(section, update=update, reselect_pos_dict=reselect_pos_dict)
                         self._noteHubsTiming(final=True)
                     # else: wait for library/cross-section tasks to finish
                 else:
                     # No cross-section hubs — draw immediately
-                    self.showHubs(section, update=update, reselect_pos_dict=reselect_pos_dict)
+                    self._show_hubs_or_defer(section, update=update, reselect_pos_dict=reselect_pos_dict)
                     self._noteHubsTiming(final=True)
             else:
                 # Library section completed
                 if self.lastSection == section:
                     # User is viewing this library section — draw it
-                    self.showHubs(section, update=update, reselect_pos_dict=reselect_pos_dict)
+                    self._show_hubs_or_defer(section, update=update, reselect_pos_dict=reselect_pos_dict)
 
                 # Track library section completion. A pinned view is not a library and feeds
                 # no cross-section hub, so counting it here would let Home draw before the
@@ -3846,7 +4420,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                     # When all libraries are done and we're on Home with cross-section hubs, draw once
                     if self._pendingLibrarySections == 0 and on_home and has_cross:
                         if self.sectionHubs.get(None) is not None:
-                            self.showHubs(self.lastSection, update=False)
+                            self._show_hubs_or_defer(self.lastSection, update=False)
                             self._noteHubsTiming(final=True)
 
     def _noteHubsTiming(self, final):
@@ -4227,7 +4801,8 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                 task = PinnedTypeHubsTask().setup(section, self.sectionHubsCallback, reselect_pos_dict=rpd)
             else:
                 task = SectionHubsTask().setup(section, self.sectionHubsCallback, self.wantedSections,
-                                               reselect_pos_dict=rpd)
+                                               reselect_pos_dict=rpd,
+                                               skip_continue=bool(self._restDrawOnGui))
             self.tasks.append(task)
             self._queueHubTask(task)
 
@@ -4371,7 +4946,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                     util.ERROR("Home: failed to restore focus after hub cleanup")
         self.storeLastBG()
 
-    def showHub(self, hub, items=None, is_home=False, reselect_pos=None, hub_index=None):
+    def showHub(self, hub, items=None, is_home=False, reselect_pos=None, hub_index=None, pin_index=False):
         identifier = hub.getCleanHubIdentifier(is_home=is_home)
 
         if hub_index is None:
@@ -4389,7 +4964,8 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             'ar16x9': flags['ar16x9'],
             'text2lines': flags['text2lines'],
         }
-        self._showHub(hub, hubitems=items, reselect_pos=reselect_pos, identifier=identifier, **kwargs)
+        self._showHub(hub, hubitems=items, reselect_pos=reselect_pos, identifier=identifier,
+                      pin_index=pin_index, **kwargs)
         return True
 
     def createGrandparentedListItem(self, obj, thumb_w, thumb_h, with_grandparent_title=False):
@@ -4554,7 +5130,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             self.setProperty('hub.display.4{0:02d}'.format(i), '')
 
     def _showHub(self, hub, hubitems=None, reselect_pos=None, identifier=None, index=None, with_progress=False,
-                 with_art=False, ar16x9=False, text2lines=False, **kwargs):
+                 with_art=False, ar16x9=False, text2lines=False, pin_index=False, **kwargs):
         control = self.hubControls[index]
         control.dataSource = hub
 
@@ -4685,6 +5261,11 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             )
         except Exception:
             util.DEBUG_LOG("Home: art prefetch hook failed")
+
+        # Post-playback updates keep the selected slot. Following the old
+        # rating key would move the highlight onto a different item.
+        if pin_index:
+            return
 
         # hub reselect logic after updating a hub
         if use_reselect_pos:
