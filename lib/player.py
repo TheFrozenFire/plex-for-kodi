@@ -980,6 +980,11 @@ class SeekPlayerHandler(BasePlayerHandler):
 
     def onPlayBackStopped(self):
         try:
+            from lib import skiprules
+            skiprules.clear_session()
+        except Exception:
+            util.DEBUG_LOG("Skip rules: clear failed")
+        try:
             from lib import stickysubs
             stickysubs.playback_ended(self.player.video)
         except Exception:
@@ -2596,6 +2601,106 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
         except Exception:
             util.DEBUG_LOG("Player: timing hook failed")
 
+    def _skiprules_allow(self, playlist):
+        """Skip whole items before playback starts. A failure still allows playback."""
+        try:
+            from lib import skiprules
+        except Exception:
+            return True
+        video = self.video
+        refresh_now = True
+        for _ in range(25):
+            if video is None:
+                return False
+            try:
+                has_next = bool(playlist and playlist.hasNext())
+                decision = skiprules.prepare(video, has_next=has_next, refresh_now=refresh_now)
+                refresh_now = False
+            except Exception:
+                util.DEBUG_LOG("Skip rules: prepare failed")
+                return True
+            action = decision.get("action") if isinstance(decision, dict) else "play"
+            if action == "play":
+                self.video = video
+                return True
+            if action == "next" and playlist and playlist.hasNext():
+                playlist.next()
+                video = playlist.current()
+                continue
+            return False
+        return False
+
+    def _finish_skipped_start(self):
+        """The item was not started. Close the playback window if it is open."""
+        handler = self.handler
+        session_id = getattr(handler, "sessionID", None) or self.sessionID
+        try:
+            if self.isPlayingVideo():
+                self.stop()
+        except Exception:
+            util.DEBUG_LOG("Skip rules: stop failed")
+        try:
+            self.trigger("session.ended", session_id=session_id)
+        except Exception:
+            util.DEBUG_LOG("Skip rules: close failed")
+
+    def _poll_skip_rules(self):
+        """Called from the player monitor, which already reads the playhead."""
+        try:
+            from lib import skiprules
+            position = self.currentTime
+            if position is None:
+                return
+            duration = None
+            try:
+                total = self.getTotalTime()
+                if total:
+                    duration = int(total * 1000)
+            except Exception:
+                duration = None
+            decision = skiprules.poll(int(position * 1000), duration)
+        except Exception:
+            util.DEBUG_LOG("Skip rules: poll failed")
+            return
+        # The monitor already reads the clock. Seeking and stopping wait for
+        # the script thread, the same handoff the hub refresh uses.
+        try:
+            import xbmc
+            if decision:
+                skiprules.queue_action(decision)
+                xbmc.executebuiltin("Action(noop)")
+            elif skiprules.poke_due():
+                xbmc.executebuiltin("Action(noop)")
+        except Exception:
+            util.DEBUG_LOG("Skip rules: handoff failed")
+
+    def _apply_skip_decision(self, decision):
+        try:
+            from lib import skiprules
+            skiprules.announce(decision)
+        except Exception:
+            util.DEBUG_LOG("Skip rules: notice failed")
+        action = decision.get("action")
+        if action == "seek":
+            try:
+                self.seekTime(decision["to_ms"] / 1000.0)
+            except Exception:
+                util.DEBUG_LOG("Skip rules: seek failed")
+            return
+        if action != "end":
+            return
+        handler = self.handler
+        if handler is not None:
+            try:
+                if handler.next(on_end=True):
+                    return
+            except Exception:
+                util.DEBUG_LOG("Skip rules: end failed")
+        try:
+            self.stop()
+        except Exception:
+            util.DEBUG_LOG("Skip rules: stop failed")
+
     def playVideo(self, video, resume=False, force_update=False, session_id=None, handler=None):
         span = self._beginPlaybackTiming()
         try:
@@ -2610,6 +2715,9 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
 
             self.video = video
             self.resume = resume
+            if not self._skiprules_allow(getattr(self.handler, "playlist", None)):
+                self._finish_skipped_start()
+                return
             self.open()
             self._playVideo(resume and video.viewOffset.asInt() or 0, force_update=force_update, session_id=session_id)
         except Exception:
@@ -3044,6 +3152,9 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
         if not fresh:
             self.video.softReload(includeChapters=1)
         self.resume = resume
+        if not self._skiprules_allow(playlist):
+            self._finish_skipped_start()
+            return
         self.open()
         self._playVideo(resume and self.video.viewOffset.asInt() or 0, seeking=handler and handler.SEEK_PLAYLIST or 0,
                         force_update=True, session_id=session_id)
@@ -3506,6 +3617,8 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
                         util.MONITOR.waitForAbort(0.1)
 
             util.MONITOR.waitForAbort(0.1)
+            if not self.isExternal:
+                self._poll_skip_rules()
             if xbmc.getCondVisibility('Window.IsActive(videoosd)'):
                 if not self.hasOSD:
                     self.hasOSD = True

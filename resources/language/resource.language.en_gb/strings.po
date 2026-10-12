@@ -3440,3 +3440,39 @@ msgstr ""
 msgctxt "#35070"
 msgid "Playback failed ({0})"
 msgstr ""
+
+msgctxt "#35071"
+msgid "Content skip rules"
+msgstr ""
+
+msgctxt "#35072"
+msgid "Skip time ranges or whole items listed in skip_rules.json in this add-on's profile folder. Off by default. A missing file skips nothing. A file that cannot be read keeps the last good copy in memory and does not stop playback."
+msgstr ""
+
+msgctxt "#35077"
+msgid "Skip lead-in"
+msgstr ""
+
+msgctxt "#35078"
+msgid "Milliseconds before a skip range starts. The playhead entering that window jumps to the end of the range. Default is 1000."
+msgstr ""
+
+msgctxt "#35079"
+msgid "Show a notice when something is skipped"
+msgstr ""
+
+msgctxt "#35080"
+msgid "Show a short notice when a range or a whole item is skipped."
+msgstr ""
+
+msgctxt "#35081"
+msgid "Skipped scene"
+msgstr ""
+
+msgctxt "#35082"
+msgid "Skipped: {reason}"
+msgstr ""
+
+msgctxt "#35083"
+msgid "Skipped"
+msgstr ""
