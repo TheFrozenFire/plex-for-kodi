@@ -176,6 +176,11 @@ def main(force_render=False):
         util.cleanupCacheFolder()
 
         with util.Cron(1 / util.addonSettings.tickrate):
+            try:
+                from lib import skiprules
+                skiprules.arm()
+            except Exception:
+                util.DEBUG_LOG("Skip rules: arm failed")
             BACKGROUND = background.BackgroundWindow.create(function=_main)
             if BACKGROUND.waitForOpen():
                 with kodigui.GlobalProperty('running'):

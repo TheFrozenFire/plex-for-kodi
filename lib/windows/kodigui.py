@@ -32,6 +32,22 @@ def _service_script_thread(window):
         util.DEBUG_LOG("script thread note failed")
     _flush_art_prefetch(window)
     _drain_remote_play()
+    _drain_skip_rules()
+
+
+def _drain_skip_rules():
+    try:
+        from lib import skiprules
+        decision = skiprules.take_action()
+    except Exception:
+        return
+    if not decision:
+        return
+    try:
+        from lib import player
+        player.PLAYER._apply_skip_decision(decision)
+    except Exception:
+        util.DEBUG_LOG("Skip rules: apply failed")
 
 
 def _flush_art_prefetch(window):

@@ -3440,3 +3440,55 @@ msgstr ""
 msgctxt "#35070"
 msgid "Playback failed ({0})"
 msgstr ""
+
+msgctxt "#35071"
+msgid "Content skip rules"
+msgstr ""
+
+msgctxt "#35072"
+msgid "Skip time ranges or whole items using a rules document this add-on downloads. Off by default. A failed download never stops playback; the last saved copy is used."
+msgstr ""
+
+msgctxt "#35073"
+msgid "Skip rules address"
+msgstr ""
+
+msgctxt "#35074"
+msgid "Where to download the rules document. Leave empty to use only the last saved copy."
+msgstr ""
+
+msgctxt "#35075"
+msgid "Skip rules token"
+msgstr ""
+
+msgctxt "#35076"
+msgid "Sent as Authorization: Bearer when the address is downloaded. Leave empty if the address needs no token."
+msgstr ""
+
+msgctxt "#35077"
+msgid "Skip lead-in"
+msgstr ""
+
+msgctxt "#35078"
+msgid "Milliseconds before a skip range starts. The playhead entering that window jumps to the end of the range. Default is 1000."
+msgstr ""
+
+msgctxt "#35079"
+msgid "Show a notice when something is skipped"
+msgstr ""
+
+msgctxt "#35080"
+msgid "Show a short notice when a range or a whole item is skipped."
+msgstr ""
+
+msgctxt "#35081"
+msgid "Skipped scene"
+msgstr ""
+
+msgctxt "#35082"
+msgid "Skipped: {reason}"
+msgstr ""
+
+msgctxt "#35083"
+msgid "Skipped"
+msgstr ""

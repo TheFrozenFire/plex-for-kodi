@@ -76,6 +76,10 @@ class UtilityMonitor(xbmc.Monitor, signalsmixin.SignalsMixin):
             self._remotePlay(data)
             return
 
+        if sender == 'script.plexmod' and method.endswith('PM4K_SKIPS_RELOAD'):
+            self._reloadSkipRules()
+            return
+
         if sender == 'script.plexmod' and method.endswith('RESTORE'):
             from .windows import kodigui, windowutils
 
@@ -174,6 +178,13 @@ class UtilityMonitor(xbmc.Monitor, signalsmixin.SignalsMixin):
             remoteplay.accept_notification(data)
         except Exception:
             LOG("Remote play: notification failed")
+
+    def _reloadSkipRules(self):
+        try:
+            from lib import skiprules
+            skiprules.reload_now()
+        except Exception:
+            LOG("Skip rules: reload failed")
 
     def _stickySubtitleNotification(self, method, data):
         if method == "Player.OnPropertyChanged":
