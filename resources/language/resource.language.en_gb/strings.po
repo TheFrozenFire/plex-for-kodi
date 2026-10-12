@@ -3446,23 +3446,7 @@ msgid "Content skip rules"
 msgstr ""
 
 msgctxt "#35072"
-msgid "Skip time ranges or whole items using a rules document this add-on downloads. Off by default. A failed download never stops playback; the last saved copy is used."
-msgstr ""
-
-msgctxt "#35073"
-msgid "Skip rules address"
-msgstr ""
-
-msgctxt "#35074"
-msgid "Where to download the rules document. Leave empty to use only the last saved copy."
-msgstr ""
-
-msgctxt "#35075"
-msgid "Skip rules token"
-msgstr ""
-
-msgctxt "#35076"
-msgid "Sent as Authorization: Bearer when the address is downloaded. Leave empty if the address needs no token."
+msgid "Skip time ranges or whole items listed in skip_rules.json in this add-on's profile folder. Off by default. A missing file skips nothing. A file that cannot be read keeps the last good copy in memory and does not stop playback."
 msgstr ""
 
 msgctxt "#35077"

@@ -1,10 +1,12 @@
 # coding=utf-8
 """Content skip rules.
 
-A remote document lists time ranges to jump, or whole items to pass over.
-The add-on pulls that document (the TV does not accept inbound connections),
-keeps the last good copy, and applies it during playback. A failed fetch
-never stops playback. The feature is off until ``skip_rules_enabled`` is on.
+Rules live in ``skip_rules.json`` in the add-on profile. An external tool
+edits that file. This module only reads it: at startup, before each
+playback start, when the file's modification time changes, and when
+``PM4K_SKIPS_RELOAD`` asks for a fresh read. A missing file means no rules.
+A file that cannot be parsed leaves the last good copy in memory. The
+feature is off until ``skip_rules_enabled`` is on.
 
 The playhead is sampled from the existing player monitor, which already
 reads the player clock. That path does not touch list items. A seek or a
@@ -18,22 +20,18 @@ import re
 import threading
 import time
 
-_INTERVAL_S = 600
-_FETCH_TIMEOUT_S = 3.0
 _POLL_S = 0.25
 _EOF_SLACK_MS = 500
 _INF = 10 ** 18
 
 _LOCK = threading.Lock()
 _doc = None
-_etag = None
+_mtime = None
 _watch = None
 _override = None
-_fetcher = None
 _toast_hook = None
-_next_refresh = 0.0
 _last_poll = None
-_cache_override = None
+_path_override = None
 _pending = None
 _next_poke = 0.0
 
@@ -41,38 +39,17 @@ _IMDB_RE = re.compile(r"imdb://(tt\d+)", re.IGNORECASE)
 _TVDB_RE = re.compile(r"(?:the)?tvdb://(\d+)", re.IGNORECASE)
 
 
-class _Receiver(object):
-    """Cron tick. Fetches when the interval has elapsed. No GUI work."""
-
-    def tick(self):
-        try:
-            maybe_refresh()
-        except Exception:
-            _log("periodic refresh failed")
-
-    def halfHour(self):
-        return False
-
-    def day(self):
-        return False
-
-
-_RECEIVER = _Receiver()
-
-
 def reset():
     """Drop in-memory state. Tests and shutdown."""
-    global _doc, _etag, _watch, _override, _fetcher, _toast_hook, _next_refresh, _last_poll, _cache_override
+    global _doc, _mtime, _watch, _override, _toast_hook, _last_poll, _path_override
     with _LOCK:
         _doc = None
-        _etag = None
+        _mtime = None
         _watch = None
         _override = None
-        _fetcher = None
         _toast_hook = None
-        _next_refresh = 0.0
         _last_poll = None
-        _cache_override = None
+        _path_override = None
         _pending = None
         _next_poke = 0.0
 
@@ -84,114 +61,74 @@ def set_override(settings):
         _override = dict(settings) if settings is not None else None
 
 
-def set_fetcher(fetcher):
-    """Test hook. ``fetcher(url, headers, timeout) -> (status, headers, body)``."""
-    global _fetcher
-    with _LOCK:
-        _fetcher = fetcher
-
-
 def set_toast_hook(hook):
     global _toast_hook
     with _LOCK:
         _toast_hook = hook
 
 
-def set_cache_path(path):
-    global _cache_override
+def set_rules_path(path):
+    """Test hook. Production reads ``skip_rules.json`` from the add-on profile."""
+    global _path_override
     with _LOCK:
-        _cache_override = path
+        _path_override = path
 
 
 def arm():
-    """Register the periodic fetch on the existing cron, if it is running."""
-    global _next_refresh
-    with _LOCK:
-        _next_refresh = 0.0
+    """Read the rules file once at startup. No extra thread."""
     try:
-        from . import util
-        cron = getattr(util, "CRON", None)
-        if cron is not None:
-            cron.registerReceiver(_RECEIVER)
+        load()
     except Exception:
-        _log("arm failed")
-
-
-def maybe_refresh(now=None):
-    """Fetch when enabled and the interval has elapsed."""
-    global _next_refresh
-    if not _settings()["enabled"]:
-        return
-    moment = time.monotonic() if now is None else now
-    with _LOCK:
-        due = moment >= _next_refresh
-        if due:
-            _next_refresh = moment + _INTERVAL_S
-    if due:
-        refresh()
+        _log("startup load failed")
 
 
 def reload_now():
-    """NotifyAll handler. Fetch immediately, still with If-None-Match."""
-    global _next_refresh
-    with _LOCK:
-        _next_refresh = time.monotonic() + _INTERVAL_S
-    refresh()
-
-
-def refresh():
-    """Pull the document. On any failure, keep the last good copy."""
-    global _doc, _etag
-    settings = _settings()
-    if not settings["enabled"]:
-        return _current_doc()
-    _ensure_loaded()
-    url = (settings.get("url") or "").strip()
-    if not url:
-        return _current_doc()
-    headers = {"Accept": "application/json"}
-    token = (settings.get("token") or "").strip()
-    if token:
-        headers["Authorization"] = "Bearer {0}".format(token)
-    with _LOCK:
-        etag = _etag
-        fetcher = _fetcher
-    if etag:
-        headers["If-None-Match"] = etag
+    """NotifyAll handler. Read the file again even if the mtime is unchanged."""
     try:
-        if fetcher is not None:
-            status, response_headers, body = fetcher(url, headers, _FETCH_TIMEOUT_S)
-        else:
-            status, response_headers, body = _http_fetch(url, headers, _FETCH_TIMEOUT_S)
+        load(force=True)
     except Exception:
-        _log("fetch failed")
-        return _current_doc()
-    response_headers = {str(k).lower(): v for k, v in (response_headers or {}).items()}
-    new_etag = response_headers.get("etag") or etag
-    if status == 304:
+        _log("reload failed")
+
+
+def load(force=False):
+    """Read ``skip_rules.json``.
+
+    A missing file clears the rules. A parse failure keeps the last good
+    copy and does not remember the bad mtime, so a later read tries again.
+    The add-on never writes this file.
+    """
+    global _doc, _mtime
+    path = rules_path()
+    if not path or not os.path.isfile(path):
+        empty = {"version": 1, "updated_at": "", "rules": []}
         with _LOCK:
-            if new_etag:
-                _etag = new_etag
-        _store()
-        return _current_doc()
-    if status != 200 or not body:
-        _log("fetch status {0}".format(status))
-        return _current_doc()
+            _doc = empty
+            _mtime = None
+        return empty
     try:
-        payload = json.loads(body.decode("utf-8") if isinstance(body, bytes) else body)
+        mtime = os.path.getmtime(path)
+    except OSError:
+        _log("rules file could not be read")
+        return _current_doc()
+    with _LOCK:
+        unchanged = (not force) and _doc is not None and _mtime == mtime
+        if unchanged:
+            return _doc
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
     except Exception:
-        _log("document was not json")
+        _log("rules file could not be parsed")
         return _current_doc()
     document, errors = parse_document(payload)
     for error in errors:
         _log("ignored rule {0}".format(error))
     if document is None:
-        _log("document rejected")
+        _log("rules file rejected")
         return _current_doc()
     with _LOCK:
         _doc = document
-        _etag = new_etag
-    _store()
+        _mtime = mtime
     return document
 
 
@@ -199,9 +136,9 @@ def prepare(item, has_next=False, refresh_now=True):
     """Match this item and decide whether it should start.
 
     Returns ``play``, ``next`` (episode with something queued after it),
-    or ``stop``. Network and parse failures still return ``play``.
-    ``refresh_now`` is false while walking further skipped episodes in the
-    same start, so one playback start causes one fetch.
+    or ``stop``. A missing or unreadable rules file still returns ``play``
+    when nothing matches. ``refresh_now`` is false while walking further
+    skipped episodes in the same start, so one playback start reads once.
     """
     global _watch
     if not _settings()["enabled"]:
@@ -210,9 +147,9 @@ def prepare(item, has_next=False, refresh_now=True):
         return {"action": "play"}
     if refresh_now:
         try:
-            refresh()
+            load()
         except Exception:
-            _log("prepare refresh failed")
+            _log("prepare load failed")
     ident = identity(item)
     matched = select(_current_doc().get("rules") or [], ident)
     _publish(ident, matched)
@@ -226,8 +163,9 @@ def prepare(item, has_next=False, refresh_now=True):
             return {"action": "next", "reason": reason}
         return {"action": "stop", "reason": reason}
     ranges = merge_ranges([rule for rule in matched if rule["type"] == "skip_range"])
+    lead_ms = _settings()["lead_ms"]
     with _LOCK:
-        _watch = Watch(ranges, _settings()["lead_ms"])
+        _watch = Watch(ranges, lead_ms)
     return {"action": "play"}
 
 
@@ -636,8 +574,6 @@ def _settings():
         override = dict(_override) if _override is not None else None
     if override is not None:
         override.setdefault("enabled", False)
-        override.setdefault("url", "")
-        override.setdefault("token", "")
         override.setdefault("lead_ms", 1000)
         override.setdefault("toast", True)
         return override
@@ -650,46 +586,25 @@ def _settings():
             lead = 1000
         return {
             "enabled": bool(getSetting("skip_rules_enabled", False)),
-            "url": getSetting("skip_rules_url", "") or "",
-            "token": getSetting("skip_rules_token", "") or "",
             "lead_ms": lead,
             "toast": bool(getSetting("skip_rules_toast", True)),
         }
     except Exception:
-        return {"enabled": False, "url": "", "token": "", "lead_ms": 1000, "toast": True}
+        return {"enabled": False, "lead_ms": 1000, "toast": True}
 
 
 def _current_doc():
-    _ensure_loaded()
     with _LOCK:
-        return _doc or {"version": 1, "updated_at": "", "rules": []}
+        if not _doc:
+            return {"version": 1, "updated_at": "", "rules": []}
+        return _doc
 
 
-def _ensure_loaded():
-    global _doc, _etag
+def rules_path():
     with _LOCK:
-        if _doc is not None:
-            return
-    loaded = _read_cache()
-    if not loaded:
-        with _LOCK:
-            if _doc is None:
-                _doc = {"version": 1, "updated_at": "", "rules": []}
-        return
-    with _LOCK:
-        if _doc is None:
-            _doc = loaded.get("document") or {"version": 1, "updated_at": "", "rules": []}
-            _etag = loaded.get("etag") or None
-
-
-def cache_path():
-    with _LOCK:
-        override = _cache_override
+        override = _path_override
     if override:
         return override
-    env = os.environ.get("PM4K_SKIP_RULES_CACHE")
-    if env:
-        return env
     try:
         from . import util
         base = util.PROFILE or ""
@@ -698,62 +613,6 @@ def cache_path():
     if not base:
         return ""
     return os.path.join(base, "skip_rules.json")
-
-
-def _read_cache():
-    path = cache_path()
-    if not path or not os.path.isfile(path):
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except Exception:
-        _log("cache unreadable")
-        return None
-    document = payload.get("document") if isinstance(payload, dict) else None
-    if not isinstance(document, dict):
-        return None
-    return payload
-
-
-def _store():
-    path = cache_path()
-    if not path:
-        return
-    with _LOCK:
-        payload = {"etag": _etag or "", "document": _doc}
-    try:
-        directory = os.path.dirname(path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, sort_keys=True)
-        os.replace(tmp, path)
-    except Exception:
-        _log("cache write failed")
-
-
-def _http_fetch(url, headers, timeout):
-    import urllib.error
-    import urllib.request
-    request = urllib.request.Request(url, headers=headers, method="GET")
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            status = getattr(response, "status", 200)
-            body = response.read()
-            hdrs = {k.lower(): v for k, v in response.headers.items()}
-            return status, hdrs, body
-    except urllib.error.HTTPError as exc:
-        hdrs = {}
-        if exc.headers:
-            hdrs = {k.lower(): v for k, v in exc.headers.items()}
-        body = b""
-        try:
-            body = exc.read()
-        except Exception:
-            body = b""
-        return exc.code, hdrs, body
 
 
 def _as_int(value):

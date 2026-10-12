@@ -62,28 +62,6 @@
                     <default>false</default>
                     <control type="toggle"/>
                 </setting>
-                <setting id="skip_rules_url" type="string" label="35073" help="35074">
-                    <level>0</level>
-                    <default></default>
-                    <constraints>
-                        <allowempty>true</allowempty>
-                    </constraints>
-                    <dependencies>
-                        <dependency type="enable" setting="skip_rules_enabled">true</dependency>
-                    </dependencies>
-                    <control type="edit" format="string"/>
-                </setting>
-                <setting id="skip_rules_token" type="string" label="35075" help="35076">
-                    <level>0</level>
-                    <default></default>
-                    <constraints>
-                        <allowempty>true</allowempty>
-                    </constraints>
-                    <dependencies>
-                        <dependency type="enable" setting="skip_rules_enabled">true</dependency>
-                    </dependencies>
-                    <control type="edit" format="string"/>
-                </setting>
                 <setting id="skip_lead_in_ms" type="integer" label="35077" help="35078">
                     <level>0</level>
                     <default>1000</default>

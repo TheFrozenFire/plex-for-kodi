@@ -218,38 +218,38 @@ class PlaybackDecisionTests(unittest.TestCase):
     def setUp(self):
         skiprules.reset()
         self._dir = tempfile.TemporaryDirectory()
-        skiprules.set_cache_path(os.path.join(self._dir.name, "skip_rules.json"))
+        skiprules.set_rules_path(os.path.join(self._dir.name, "skip_rules.json"))
         self.toasts = []
         skiprules.set_toast_hook(self.toasts.append)
+        skiprules.set_override({
+            "enabled": True,
+            "lead_ms": 1000,
+            "toast": True,
+        })
 
     def tearDown(self):
         skiprules.reset()
         self._dir.cleanup()
 
-    def _enable(self, fetcher, token="secret"):
-        skiprules.set_override({
-            "enabled": True,
-            "url": "https://rules.example/rules",
-            "token": token,
-            "lead_ms": 1000,
-            "toast": True,
-        })
-        skiprules.set_fetcher(fetcher)
+    def _write(self, document, mtime=None):
+        path = skiprules.rules_path()
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(document, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mtime is not None:
+            os.utime(path, (mtime, mtime))
+        return path
 
-    def test_skip_item_episode_advances_and_movie_stops(self):
-        body = json.dumps({
+    def test_file_load_skips_episode_and_movie(self):
+        self._write({
             "version": 1,
+            "updated_at": "2026-01-01T00:00:00Z",
             "rules": [
                 {"id": "ep", "type": "skip_item", "plex_rating_key": "12345", "reason": "recap"},
                 {"id": "film", "type": "skip_item", "plex_rating_key": "999", "reason": "trailer"},
             ],
-        }).encode("utf-8")
-
-        def fetcher(url, headers, timeout):
-            self.assertEqual("Bearer secret", headers.get("Authorization"))
-            return 200, {"etag": "v1"}, body
-
-        self._enable(fetcher)
+        })
         episode = skiprules.prepare(_episode(), has_next=True)
         self.assertEqual("next", episode["action"])
         self.assertIn("recap", self.toasts[-1])
@@ -258,68 +258,73 @@ class PlaybackDecisionTests(unittest.TestCase):
         alone = skiprules.prepare(_episode(), has_next=False)
         self.assertEqual("stop", alone["action"])
 
-    def test_cache_used_when_the_fetch_fails(self):
-        path = skiprules.cache_path()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+    def test_missing_file_means_no_rules(self):
+        self.assertEqual("play", skiprules.prepare(_episode(), has_next=True)["action"])
+        self.assertEqual([], skiprules.load()["rules"])
+
+    def test_reload_when_mtime_changes(self):
+        path = self._write({
+            "version": 1,
+            "rules": [{"id": "first", "type": "skip_item", "plex_rating_key": "12345", "reason": "first"}],
+        })
+        first = skiprules.prepare(_episode(), has_next=False)
+        self.assertEqual("first", first["reason"])
+        stamp = os.stat(path).st_mtime
+        self._write({
+            "version": 1,
+            "rules": [{"id": "second", "type": "skip_item", "plex_rating_key": "12345", "reason": "second"}],
+        }, mtime=stamp)
+        held = skiprules.prepare(_episode(), has_next=False)
+        self.assertEqual("first", held["reason"])
+        os.utime(path, (stamp + 5, stamp + 5))
+        changed = skiprules.prepare(_episode(), has_next=False)
+        self.assertEqual("second", changed["reason"])
+
+    def test_forced_reload_reads_even_when_mtime_is_unchanged(self):
+        path = self._write({
+            "version": 1,
+            "rules": [{"id": "first", "type": "skip_item", "plex_rating_key": "12345", "reason": "first"}],
+        })
+        skiprules.load()
+        stamp = os.stat(path).st_mtime
+        self._write({
+            "version": 1,
+            "rules": [{"id": "second", "type": "skip_item", "plex_rating_key": "12345", "reason": "second"}],
+        }, mtime=stamp)
+        self.assertEqual(["first"], [rule["id"] for rule in skiprules.load()["rules"]])
+        skiprules.reload_now()
+        self.assertEqual(["second"], [rule["id"] for rule in skiprules.load()["rules"]])
+
+    def test_bad_file_keeps_the_last_good_copy(self):
+        path = self._write({
+            "version": 1,
+            "rules": [{"id": "kept", "type": "skip_item", "plex_rating_key": "12345", "reason": "kept"}],
+        })
+        self.assertEqual("kept", skiprules.prepare(_episode(), has_next=False)["reason"])
+        stamp = os.stat(path).st_mtime + 5
         with open(path, "w", encoding="utf-8") as handle:
-            json.dump({
-                "etag": "saved",
-                "document": {
-                    "version": 1,
-                    "updated_at": "2026-01-01T00:00:00Z",
-                    "rules": [{
-                        "id": "cached",
-                        "type": "skip_item",
-                        "plex_rating_key": "12345",
-                        "reason": "cached",
-                    }],
-                },
-            }, handle)
-
-        def fetcher(url, headers, timeout):
-            raise OSError("offline")
-
-        self._enable(fetcher)
+            handle.write("{not json")
+        os.utime(path, (stamp, stamp))
         decision = skiprules.prepare(_episode(), has_next=False)
-        self.assertEqual("stop", decision["action"])
-        self.assertEqual("cached", decision["reason"])
+        self.assertEqual("kept", decision["reason"])
+        os.utime(path, (stamp + 5, stamp + 5))
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"version": 2, "rules": []}, handle)
+        still = skiprules.prepare(_episode(), has_next=False)
+        self.assertEqual("kept", still["reason"])
 
-    def test_disabled_does_not_fetch_or_skip(self):
-        def fetcher(url, headers, timeout):
-            raise AssertionError("fetch while disabled")
-
-        skiprules.set_fetcher(fetcher)
+    def test_disabled_does_not_skip(self):
+        self._write({
+            "version": 1,
+            "rules": [{"id": "ep", "type": "skip_item", "plex_rating_key": "12345", "reason": "recap"}],
+        })
         skiprules.set_override({
             "enabled": False,
-            "url": "https://rules.example/rules",
-            "token": "secret",
             "lead_ms": 1000,
             "toast": True,
         })
         self.assertEqual("play", skiprules.prepare(_episode(), has_next=True)["action"])
-        skiprules.maybe_refresh(now=10_000)
         self.assertIsNone(skiprules.poll(15_000, 100_000, now=10_000))
-
-    def test_not_modified_keeps_the_saved_rules(self):
-        calls = {"n": 0}
-
-        def fetcher(url, headers, timeout):
-            calls["n"] += 1
-            if calls["n"] == 1:
-                body = json.dumps({
-                    "version": 1,
-                    "rules": [_rule(id="kept", plex_rating_key="12345")],
-                }).encode("utf-8")
-                return 200, {"ETag": '"one"'}, body
-            self.assertEqual('"one"', headers.get("If-None-Match"))
-            return 304, {"ETag": '"one"'}, b""
-
-        self._enable(fetcher, token="")
-        first = skiprules.refresh()
-        second = skiprules.refresh()
-        self.assertEqual(["kept"], [rule["id"] for rule in first["rules"]])
-        self.assertEqual(["kept"], [rule["id"] for rule in second["rules"]])
-        self.assertEqual(2, calls["n"])
 
 
 if __name__ == "__main__":

@@ -1,33 +1,31 @@
 # Content skip rules
 
-The add-on can skip a time range, or a whole item, using a rules document it downloads. The TV does not accept inbound connections. Nothing is skipped until **Content skip rules** is turned on. That switch is off by default.
+The add-on can skip a time range, or a whole item, using a rules file on the device. Nothing is skipped until **Content skip rules** is turned on. That switch is off by default.
 
-A failed download never stops playback. The last document that parsed is kept and used.
+The file is `skip_rules.json` in the add-on profile (`special://profile/addon_data/script.plexmod/skip_rules.json`). An external tool edits it. The add-on only reads it, and never writes it. Writers should replace the file with an atomic rename.
+
+A missing file means there are no rules. If the file cannot be parsed, the last good copy stays in memory and the failure is logged. Playback still starts.
 
 ## Settings
 
 | Setting | Default | Role |
 | --- | --- | --- |
 | `skip_rules_enabled` | off | Master switch. |
-| `skip_rules_url` | empty | Where to download the document. Empty uses only the saved copy. |
-| `skip_rules_token` | empty | Sent as `Authorization: Bearer` when the address is set. |
 | `skip_lead_in_ms` | 1000 | How early, in milliseconds, a range starts to count. |
 | `skip_rules_toast` | on | Short notice when something is skipped. |
 
-The token is not written into the log or into the status property.
+## When the file is read
 
-## When the document is fetched
-
-- Once at startup, on the existing timer, when the switch is on.
-- Again every 10 minutes.
+- Once at startup.
 - Again immediately before each playback start.
-- When Kodi is sent `NotifyAll` from `script.plexmod` with message `PM4K_SKIPS_RELOAD`, and the switch is on.
+- Again when the file's modification time has changed since the last good read.
+- When Kodi is sent `NotifyAll` from `script.plexmod` with message `PM4K_SKIPS_RELOAD`. That reads the file even if the modification time is unchanged.
 
-Requests send `If-None-Match` when a previous response included an `ETag`. A `304` keeps the saved copy. The saved copy lives in the add-on profile as `skip_rules.json`. Each attempt times out after a few seconds. A timeout, a bad status, or a document that is not version 1 leaves the saved copy in place.
+The rules chosen for an item are fixed when that item starts. A file edited during playback applies to the next item, or after `PM4K_SKIPS_RELOAD` on the next start.
 
 ## Document
 
-Unknown fields are ignored. A rule that is missing a matcher, or that has a bad type or a bad range, is dropped and logged by id. The rest of the document is kept.
+Unknown fields are ignored. Leave an unused field out. A null is treated the same as a missing field, so a hand-edited file still loads. A rule that is missing a matcher, or that has a bad type or a bad range, is dropped and logged by id. The rest of the document is kept. A file that is not version 1, or that is not JSON, is rejected and the previous good copy stays in memory.
 
 ```json
 {
@@ -38,14 +36,6 @@ Unknown fields are ignored. A rule that is missing a matcher, or that has a bad 
       "id": "intro-1",
       "type": "skip_range",
       "plex_rating_key": "12345",
-      "server": null,
-      "show_title": null,
-      "season": null,
-      "episode": null,
-      "movie_title": null,
-      "year": null,
-      "imdb": null,
-      "tvdb": null,
       "start_ms": 0,
       "end_ms": 90000,
       "reason": "intro",
