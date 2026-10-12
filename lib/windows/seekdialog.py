@@ -1543,6 +1543,7 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
                     self.player.pause()
                 downloaded = self.downloadPlexSubtitles(self.player.video)
                 if downloaded:
+                    self._rememberStickySubtitles(downloaded)
                     self.setSubtitles(honor_forced_subtitles_override=False,
                                       honor_deselect_subtitles=False, ref=None)
                 elif downloaded is None:
@@ -1679,14 +1680,26 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
             self.enableSubtitles()
             return True
 
+    def _rememberStickySubtitles(self, stream, off=False):
+        try:
+            from lib import stickysubs
+            if off:
+                stickysubs.remember_stream(self.player.video, None)
+            elif stream:
+                stickysubs.remember_stream(self.player.video, stream)
+        except Exception:
+            util.DEBUG_LOG("Sticky subs: remember failed")
+
     def disableSubtitles(self):
         self.player.video.disableSubtitles(sync_to_server=False)
+        self._rememberStickySubtitles(None, off=True)
         self.setSubtitles()
         if self.isTranscoded:
             self.doSeek(self.trueOffset(), settings_changed=True)
 
     def enableSubtitles(self):
         stream = self.player.video.enableSubtitles(sync_to_server=False)
+        self._rememberStickySubtitles(stream)
         self.setSubtitles()
         util.showNotification(str(stream), time_ms=1500, header=util.T(32396, "Subtitles"))
         if self.isTranscoded:
@@ -1697,6 +1710,7 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
         Selects the first subtitle or the next one
         """
         stream = self.player.video.cycleSubtitles(forward=forward, sync_to_server=False)
+        self._rememberStickySubtitles(stream)
         self.setSubtitles(honor_forced_subtitles_override=False, honor_deselect_subtitles=False)
         util.showNotification(str(stream), time_ms=1500, header=util.T(32396, "Subtitles"))
         if self.isTranscoded:

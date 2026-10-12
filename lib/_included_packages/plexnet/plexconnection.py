@@ -31,6 +31,21 @@ LOCAL_NETWORKS = {
 LOCALS_SEEN = {}
 
 
+def skip_known_unreachable():
+    """Do not probe an address that has already failed reachability.
+
+    New connection objects start unknown, so a changed server list is tested
+    again. ``skip_dead_connections`` defaults on.
+    """
+    interface = util.INTERFACE
+    if interface is None:
+        return True
+    try:
+        return bool(interface.getPreference("skip_dead_connections", True))
+    except Exception:
+        return True
+
+
 class ConnectionSource(int):
     def init(self, name):
         self.name = name
@@ -222,6 +237,10 @@ class PlexConnection(object):
                 self.state = self.STATE_UNKNOWN
             if server.activeConnection is self:
                 server.activeConnection = None
+            return False
+
+        if self.state == self.STATE_UNREACHABLE and skip_known_unreachable():
+            util.DEBUG_LOG("Skip reachability test for {0} (already unreachable)", self.address)
             return False
 
         # Check if we will allow the connection test. If this is a fallback connection,

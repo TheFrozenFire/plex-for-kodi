@@ -200,6 +200,11 @@ class VideoPlayerWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RolesMi
 
     def onAction(self, action):
         try:
+            from . import kodigui
+            kodigui._drain_skip_rules()
+        except Exception:
+            util.DEBUG_LOG("Skip rules: drain failed")
+        try:
             if self.postPlayMode:
                 controlID = self.getFocusId()
 
