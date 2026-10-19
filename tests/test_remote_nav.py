@@ -15,8 +15,9 @@ from .base import KodiTestCase, REPO_ROOT
 
 
 class _Section(object):
-    def __init__(self, kind, item_type=None):
+    def __init__(self, kind, item_type=None, title=""):
         self.type = kind
+        self.title = title
         if item_type:
             self.itemType = item_type
 
@@ -99,8 +100,8 @@ class RemoteNavTest(KodiTestCase):
         hubrefresh.reset()
         super(RemoteNavTest, self).tearDown()
 
-    def _open(self, home, kind):
-        self.opened.append(kind)
+    def _open(self, home, spec):
+        self.opened.append(spec.get("type"))
         return True
 
     def test_home_selects_the_home_section_on_the_script_thread(self):
@@ -169,7 +170,7 @@ class RemoteNavTest(KodiTestCase):
         self.assertTrue(ENV.logged("Remote nav: failed reason=not_ready"))
 
     def test_missing_library_is_logged(self):
-        remotenav._HOOKS["open_section"] = lambda home, kind: False
+        remotenav._HOOKS["open_section"] = lambda home, spec: False
         result = remotenav.accept_notification('{"to":"section","type":"show"}')
         self.assertEqual("no_section", result["reason"])
         self.assertFalse(result["ok"])
@@ -298,16 +299,67 @@ class RemoteNavTest(KodiTestCase):
             _Row(None),
         ]))
         window.go_root = True
-        self.assertTrue(remotenav._open_section(window, "movie"))
+        self.assertTrue(remotenav._open_section(window, {"type": "movie"}))
         self.assertIs(first_movie, window.clicks[0].dataSource)
         self.assertEqual([window.SECTION_LIST_ID], window.focused_control)
         self.assertFalse(window.go_root)
 
         photo = _Window(_Rows([_Row(_Section("photo"))]))
         photo.go_root = True
-        self.assertFalse(remotenav._open_section(photo, "show"))
+        self.assertFalse(remotenav._open_section(photo, {"type": "show"}))
         self.assertFalse(photo.clicks)
         self.assertTrue(photo.go_root)
+
+    def test_title_opens_that_library_only(self):
+        remotenav._HOOKS["open_section"] = None
+        movies = _Section("movie", title="Movies")
+        shows = _Section("show", title="TV Shows")
+        fourk = _Section("movie", title="4K Movies")
+        music = _Section("artist", title="Music")
+        window = _Window(_Rows([
+            _Row(_Section("home", title="Home")),
+            _Row(_Section("playlists", title="Playlists")),
+            _Row(_Section("movie", title="Movies", item_type="collection")),
+            _Row(movies),
+            _Row(shows),
+            _Row(fourk),
+            _Row(music),
+        ]))
+        remotenav._HOOKS["home"] = lambda: window
+
+        titled = remotenav.accept_notification('{"to":"section","title":"  tv shows "}')
+        self.assertEqual({"ok": True, "to": "section", "title": "tv shows"}, titled)
+        self.assertIs(shows, window.clicks[-1].dataSource)
+        self.assertTrue(ENV.logged("Remote nav: ok to=section title=tv shows"))
+
+        both = remotenav.accept_notification('{"to":"section","type":"movie","title":"4K Movies"}')
+        self.assertTrue(both["ok"])
+        self.assertEqual("movie", both["type"])
+        self.assertIs(fourk, window.clicks[-1].dataSource)
+
+        music_hit = remotenav.accept_notification('{"to":"section","title":"MUSIC"}')
+        self.assertTrue(music_hit["ok"])
+        self.assertIs(music, window.clicks[-1].dataSource)
+
+        missed = remotenav.accept_notification('{"to":"section","type":"movie","title":"TV Shows"}')
+        self.assertEqual("no_section", missed["reason"])
+        self.assertFalse(missed["ok"])
+        self.assertEqual(3, len(window.clicks))
+        self.assertTrue(ENV.logged("Remote nav: failed reason=no_section type=movie title=TV Shows"))
+
+        absent = remotenav.accept_notification('{"to":"section","title":"Missing"}')
+        self.assertEqual("no_section", absent["reason"])
+        self.assertEqual(3, len(window.clicks))
+
+        first = remotenav.accept_notification('{"to":"section","type":"movie"}')
+        self.assertTrue(first["ok"])
+        self.assertIs(movies, window.clicks[-1].dataSource)
+        self.assertNotIn("title", first)
+
+        blank = remotenav.accept_notification('{"to":"section","title":"   ","type":"show"}')
+        self.assertTrue(blank["ok"])
+        self.assertIs(shows, window.clicks[-1].dataSource)
+        self.assertIsNone(remotenav.accept_notification('{"to":"section","title":"   "}'))
 
     def test_overlay_detection_uses_the_home_window_id(self):
         remotenav._HOOKS["overlays"] = None

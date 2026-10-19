@@ -120,9 +120,16 @@ is `script.plexmod` and the message is `PM4K_NAV`. Kodi delivers it as
   it were chosen on the home screen
 - `{"to":"section","type":"movie"}` — open the first Movies library the same
   way
+- `{"to":"section","title":"TV Shows"}` — open the library with that title
+- `{"to":"section","type":"movie","title":"Movies"}` — the title and the type
+  both have to match
+
+`title` matches the library title exactly, ignoring case and surrounding
+whitespace. If a title is set and no library matches, nothing opens. The
+add-on does not fall back to the first library of that type.
 
 ```json
-{"sender":"script.plexmod","message":"PM4K_NAV","data":{"to":"home"}}
+{"sender":"script.plexmod","message":"PM4K_NAV","data":{"to":"section","title":"TV Shows"}}
 ```
 
 Nothing happens while a video is playing. Any other payload is ignored.

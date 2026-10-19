@@ -1,5 +1,5 @@
 # coding=utf-8
-"""Open Home, or the first TV or movie library, from outside Kodi.
+"""Open Home, or a TV or movie library, from outside Kodi.
 
 The running add-on listens for ``Other.PM4K_NAV`` (``JSONRPC.NotifyAll``
 with sender ``script.plexmod`` and message ``PM4K_NAV``).
@@ -56,6 +56,12 @@ def parse_notification(data):
     if dest != "section":
         return None
     kind = str(payload.get("type") or "").strip().lower()
+    title = _clean_title(payload.get("title", None))
+    if title:
+        request = {"to": "section", "title": title}
+        if kind:
+            request["type"] = kind
+        return request
     if kind not in ("show", "movie"):
         return None
     return {"to": "section", "type": kind}
@@ -144,7 +150,11 @@ def _valid(request):
         return False
     if request.get("to") == "home":
         return True
-    return request.get("to") == "section" and request.get("type") in ("show", "movie")
+    if request.get("to") != "section":
+        return False
+    if request.get("title"):
+        return True
+    return request.get("type") in ("show", "movie")
 
 
 def _perform(request):
@@ -174,7 +184,7 @@ def _perform(request):
         return ("defer",)
     if request["to"] == "home":
         return ("focus", home)
-    return ("open", home, request["type"])
+    return ("open", home, _section_spec(request))
 
 
 def _finish(action, request):
@@ -205,23 +215,24 @@ def _finish(action, request):
     if kind != "open":
         LOG("Remote nav: ignored reason=bad_request")
         return None
-    library_type = action[2]
+    spec = action[2]
+    detail = _section_detail(spec)
     with _LOCK:
         _APPLYING = True
     try:
         try:
-            opened = _open_section(action[1], library_type)
+            opened = _open_section(action[1], spec)
         except Exception:
             LOG("Remote nav: failed reason=error")
-            return {"ok": False, "reason": "error", "to": "section", "type": library_type}
+            return _section_result(False, "error", spec)
     finally:
         with _LOCK:
             _APPLYING = False
     if opened:
-        LOG("Remote nav: ok to=section type={0}", library_type)
-        return {"ok": True, "to": "section", "type": library_type}
-    LOG("Remote nav: failed reason=no_section type={0}", library_type)
-    return {"ok": False, "reason": "no_section", "to": "section", "type": library_type}
+        LOG("Remote nav: ok to=section {0}", detail)
+        return _section_result(True, "opened", spec)
+    LOG("Remote nav: failed reason=no_section {0}", detail)
+    return _section_result(False, "no_section", spec)
 
 
 def _focus_home(home):
@@ -257,13 +268,17 @@ def _focus_home(home):
         pass
 
 
-def _open_section(home, kind):
-    """Open the first library of ``kind``, the way a click on it does."""
+def _open_section(home, spec):
+    """Open the library ``spec`` names, the way a click on it does.
+
+    With no title, ``spec`` is the first library of that type. A title
+    must match on its own; a miss does not open another library.
+    """
     hook = _HOOKS.get("open_section")
     if hook is not None:
-        return bool(hook(home, kind))
+        return bool(hook(home, spec))
     section_list = getattr(home, "sectionList", None)
-    item = _first_section(home, kind)
+    item = _find_section(home, spec)
     if item is None or section_list is None:
         return False
     try:
@@ -296,26 +311,82 @@ def _open_section(home, kind):
     return True
 
 
-def _first_section(home, kind):
-    """First home-screen library whose type is ``kind``.
+def _find_section(home, spec):
+    """The library to open, or None.
 
     A pinned item-type view reports its library's type, but it is not the
-    library. Home, playlists, and the watchlist do not match ``show`` or
-    ``movie``.
+    library. Home, playlists, and the watchlist are not libraries either.
     """
     section_list = getattr(home, "sectionList", None)
     if section_list is None:
         return None
+    kind = spec.get("type") or ""
+    title = spec.get("title") or ""
     for item in section_list:
         section = getattr(item, "dataSource", None)
-        if not section:
+        if not section or getattr(section, "itemType", None):
             continue
-        if getattr(section, "itemType", None):
-            continue
-        if str(getattr(section, "type", "") or "").strip().lower() != kind:
+        if title:
+            if not _titles_match(section, title):
+                continue
+            if kind and _section_type(section) != kind:
+                continue
+            if not _is_library(section):
+                continue
+            return item
+        if _section_type(section) != kind:
             continue
         return item
     return None
+
+
+def _section_spec(request):
+    spec = {}
+    if request.get("type"):
+        spec["type"] = request["type"]
+    if request.get("title"):
+        spec["title"] = request["title"]
+    return spec
+
+
+def _section_detail(spec):
+    parts = []
+    if spec.get("type"):
+        parts.append("type={0}".format(spec["type"]))
+    if spec.get("title"):
+        parts.append("title={0}".format(spec["title"]))
+    return " ".join(parts)
+
+
+def _section_result(ok, reason, spec):
+    result = {"ok": bool(ok), "to": "section"}
+    if spec.get("type"):
+        result["type"] = spec["type"]
+    if spec.get("title"):
+        result["title"] = spec["title"]
+    if not ok:
+        result["reason"] = reason
+    return result
+
+
+def _clean_title(value):
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _section_type(section):
+    return str(getattr(section, "type", "") or "").strip().lower()
+
+
+def _titles_match(section, title):
+    wanted = title.strip().lower()
+    found = str(getattr(section, "title", "") or "").strip().lower()
+    return bool(wanted) and found == wanted
+
+
+def _is_library(section):
+    return _section_type(section) in ("show", "movie", "artist", "photo")
 
 
 def _home():
