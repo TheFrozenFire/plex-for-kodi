@@ -21,9 +21,9 @@ MONITOR = None
 def _service_script_thread(window):
     """Record this callback as the event loop, then apply queued GUI work.
 
-    Art prefetch and remote play both wait for this thread. Call it from
-    a window action. A worker must not call it: that would claim the
-    event loop and then paint.
+    Art prefetch, remote play, and remote navigation all wait for this
+    thread. Call it from a window action. A worker must not call it: that
+    would claim the event loop and then paint.
     """
     try:
         from lib import hubrefresh
@@ -32,6 +32,7 @@ def _service_script_thread(window):
         util.DEBUG_LOG("script thread note failed")
     _flush_art_prefetch(window)
     _drain_remote_play()
+    _drain_remote_nav()
     _drain_skip_rules()
 
 
@@ -67,6 +68,14 @@ def _drain_remote_play():
         remoteplay.drain()
     except Exception:
         util.DEBUG_LOG("remote play drain failed")
+
+
+def _drain_remote_nav():
+    try:
+        from lib import remotenav
+        remotenav.drain()
+    except Exception:
+        util.DEBUG_LOG("remote nav drain failed")
 
 
 def _drop_art_prefetch(window):

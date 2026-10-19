@@ -80,6 +80,10 @@ class UtilityMonitor(xbmc.Monitor, signalsmixin.SignalsMixin):
             self._reloadSkipRules()
             return
 
+        if sender == 'script.plexmod' and method.endswith('PM4K_NAV'):
+            self._remoteNav(data)
+            return
+
         if sender == 'script.plexmod' and method.endswith('RESTORE'):
             from .windows import kodigui, windowutils
 
@@ -178,6 +182,13 @@ class UtilityMonitor(xbmc.Monitor, signalsmixin.SignalsMixin):
             remoteplay.accept_notification(data)
         except Exception:
             LOG("Remote play: notification failed")
+
+    def _remoteNav(self, data):
+        try:
+            from lib import remotenav
+            remotenav.accept_notification(data)
+        except Exception:
+            LOG("Remote nav: notification failed")
 
     def _reloadSkipRules(self):
         try:

@@ -107,3 +107,23 @@ A title search returns the same attribute:
 ```bash
 curl -s --get "http://SERVER:32400/search" --data-urlencode "query=TITLE" --data-urlencode "X-Plex-Token=TOKEN"
 ```
+
+## Navigate
+
+The same `JSONRPC.NotifyAll` call can move the running add-on. The sender
+is `script.plexmod` and the message is `PM4K_NAV`. Kodi delivers it as
+`Other.PM4K_NAV`. `data` is one of:
+
+- `{"to":"home"}` — close PlexMod windows on top of Home, select the Home
+  section, and focus the section list
+- `{"to":"section","type":"show"}` — open the first TV Shows library, as if
+  it were chosen on the home screen
+- `{"to":"section","type":"movie"}` — open the first Movies library the same
+  way
+
+```json
+{"sender":"script.plexmod","message":"PM4K_NAV","data":{"to":"home"}}
+```
+
+Nothing happens while a video is playing. Any other payload is ignored.
+Each result is a `Remote nav:` line in the log.

@@ -898,6 +898,14 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             util.DEBUG_LOG("Home: Go root requested, reinitializing")
             self.onReInit()
 
+    def _nudge_remote_nav(self):
+        """Run a queued remote navigation once Home is the active window again."""
+        try:
+            from lib import remotenav
+            remotenav.nudge()
+        except Exception:
+            util.DEBUG_LOG("Remote nav: nudge failed")
+
     @timing.span_func("return.home")
     def onReInit(self):
         self._note_script_thread()
@@ -906,6 +914,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             # Home is back, even if focus restore is being ignored. A refresh
             # that finished while a season window was up is still waiting.
             self._drain_hub_refresh_safe()
+            self._nudge_remote_nav()
             return
 
         # Focus restore fires onFocus. That is not the user moving.
@@ -919,6 +928,7 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
                 self._drain_hub_refresh()
             except Exception:
                 util.DEBUG_LOG("Hub refresh: drain failed")
+            self._nudge_remote_nav()
 
     def _onReInitBody(self):
         if player.PLAYER.bgmPlaying:
