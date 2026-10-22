@@ -29,6 +29,21 @@ from six.moves import range
 
 FIVE_MINUTES_MILLIS = 300000
 
+
+def action_counts_as_watch_activity(action):
+    """Remote or keyboard input from a person.
+
+    ``Action(noop)`` is how background work wakes the script thread. It is not
+    someone watching, and neither is action id 0.
+    """
+    try:
+        action_id = action.getId()
+    except Exception:
+        return False
+    # Kodi's ActionIDs.h value, used when the binding does not export the name.
+    noop = getattr(xbmcgui, "ACTION_NOOP", 999)
+    return action_id not in (0, noop)
+
 # Fastseek (CoreELEC p3i T4+ feature, coreelec.amlogic.fastseek, default ON)
 # snaps playback to a keyframe instead of decoding to the exact target, so
 # after a perfectly successful seek the player time can sit up to one GOP
@@ -359,6 +374,11 @@ class SeekPlayerHandler(BasePlayerHandler):
         self.pausedForSeek = False
         self.reportedSeekPlayerTime = None
         self._absSeekSettled = True
+        # Startup seeks (resume, intro, seek-back) happen before this flips.
+        # A seek event after that, which this player did not request, is a person.
+        self.passoutArmed = False
+        self.passoutSuppressSeek = False
+        self.passoutSuppressTransport = 0
         self.blackout = False
         self.blackoutWasWanted = False
         self.pbStartedSet = False
@@ -860,6 +880,9 @@ class SeekPlayerHandler(BasePlayerHandler):
             stickysubs.arm(self.player.video)
         except Exception:
             util.DEBUG_LOG("Sticky subs: arm failed")
+        # Resume, intro skip and seek-back have already run. Later seeks that
+        # this handler did not ask for count as someone still watching.
+        self.passoutArmed = True
 
     def onPrePlayStarted(self):
         util.DEBUG_LOG('SeekHandler: onPrePlayStarted, DP: {}', self.isDirectPlay)
@@ -2483,6 +2506,13 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
         elif action == "playAt":
             self.handler.playAt(kwargs['pos'])
 
+    def noteWatchActivity(self):
+        """A person did something during playback. Passout protection listens."""
+        try:
+            self.trigger('user.activity')
+        except Exception:
+            util.DEBUG_LOG('Player: watch activity notify failed')
+
     @property
     def playState(self):
         if xbmc.getCondVisibility('Player.Playing'):
@@ -2682,9 +2712,16 @@ class PlexPlayer(xbmc.Player, signalsmixin.SignalsMixin):
             util.DEBUG_LOG("Skip rules: notice failed")
         action = decision.get("action")
         if action == "seek":
+            # Content rules seek on their own. That must not look like a person
+            # reaching for the remote, or passout protection never fires.
+            handler = self.handler
+            if handler is not None:
+                handler.passoutSuppressSeek = True
             try:
                 self.seekTime(decision["to_ms"] / 1000.0)
             except Exception:
+                if handler is not None:
+                    handler.passoutSuppressSeek = False
                 util.DEBUG_LOG("Skip rules: seek failed")
             return
         if action != "end":
