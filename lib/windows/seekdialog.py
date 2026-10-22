@@ -92,6 +92,77 @@ MARKER_CHAPTER_OVERLAP_THRES = 30000  # 30 seconds
 MARKER_END_JUMP_OFF = 1000
 
 
+def note_watch_activity(player, action=None):
+    """Tell passout protection that a person is still here.
+
+    ``action`` is omitted for pause, resume and seek events that did not
+    arrive as a key. A key is ignored when it is only ``Action(noop)``.
+    """
+    if action is not None:
+        try:
+            from lib.player import action_counts_as_watch_activity
+        except Exception:
+            return
+        if not action_counts_as_watch_activity(action):
+            return
+    if player is None:
+        return
+    note = getattr(player, "noteWatchActivity", None)
+    if not note:
+        return
+    try:
+        note()
+    except Exception:
+        util.DEBUG_LOG("Passout: activity notify failed")
+
+
+def seek_event_is_automatic(handler):
+    """True when this seek was asked for by playback itself.
+
+    Resume, intro skip, seek-back and subtitle repair all leave a trace on
+    the handler. A remote seek does not. Until the opening seeks have
+    finished, nothing that looks like a seek counts as a person.
+    """
+    if handler is None:
+        return True
+    if getattr(handler, "passoutSuppressSeek", False):
+        handler.passoutSuppressSeek = False
+        return True
+    if not getattr(handler, "passoutArmed", False):
+        return True
+    if getattr(handler, "seekOnStart", None) is not None:
+        return True
+    if getattr(handler, "seekingBackTo", False):
+        return True
+    if getattr(handler, "waitingForSOS", False):
+        return True
+    if getattr(handler, "pausedForSeek", False):
+        return True
+    return False
+
+
+def transport_is_automatic(handler):
+    """Pause/resume that playback itself asked for, including the opening buffer.
+
+    A pause before the player has finished starting is part of that opening,
+    not someone pressing pause. ``passoutSuppressTransport`` counts events
+    this dialog requested (buffer fill). Each matching callback consumes one.
+    """
+    if handler is None:
+        return True
+    pending = getattr(handler, "passoutSuppressTransport", 0) or 0
+    if pending:
+        handler.passoutSuppressTransport = pending - 1
+        return True
+    return not getattr(handler, "passoutArmed", False)
+
+
+def mark_automatic_transport(handler):
+    if handler is None:
+        return
+    handler.passoutSuppressTransport = getattr(handler, "passoutSuppressTransport", 0) + 1
+
+
 class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownloadMixin):
     """
     fixme: This is a convoluted mess.
@@ -673,6 +744,12 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
             self.idleTime = None
             # user input means someone's actually watching
             util.MONITOR.tv_standby = False
+            try:
+                handler = self.handler
+                if handler is not None:
+                    note_watch_activity(handler.player, action)
+            except Exception:
+                util.DEBUG_LOG("Passout: activity notify failed")
 
             lastAction = self._lastAction
             lastActionID = self._lastAction[0] if self._lastAction else None
@@ -1038,6 +1115,11 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
     def onClick(self, controlID):
         if self._ignoreInput:
             return
+
+        try:
+            note_watch_activity(self.player)
+        except Exception:
+            util.DEBUG_LOG("Passout: activity notify failed")
 
         if controlID in (self.MAIN_BUTTON_ID, self.NO_OSD_BUTTON_ID):
             # only react to click events on our main areas if we're not in mouse mode, otherwise mouse seeking is
@@ -2223,6 +2305,7 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
                 if self.player.playState == self.player.STATE_PLAYING:
                     util.DEBUG_LOG("SeekDialog.buffer: Waiting for buffer to reach {} (is: {}), pausing"
                                    .format(sensibleBufferPerc, currentBufferPerc))
+                    mark_automatic_transport(self.handler)
                     self.player.pause()
                     wasPlaying = True
 
@@ -2272,6 +2355,7 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
                 if self.player.playState == self.player.STATE_PAUSED and wasPlaying:
                     # resume
                     util.DEBUG_LOG("SeekDialog.buffer: Buffer filled, resuming")
+                    mark_automatic_transport(self.handler)
                     self.player.pause()
                     return True
             else:
@@ -2284,6 +2368,7 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
 
             wasPlaying = False
             if self.player.playState == self.player.STATE_PLAYING:
+                mark_automatic_transport(self.handler)
                 self.player.pause()
                 wasPlaying = True
 
@@ -2292,6 +2377,7 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
                 util.MONITOR.waitForAbort(wait)
                 self.waitingForBuffer = False
                 if self.player.playState == self.player.STATE_PAUSED and wasPlaying:
+                    mark_automatic_transport(self.handler)
                     self.player.pause()
                 return True
 
@@ -2314,6 +2400,12 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
         if self.handler and self.handler.pausedForSeek:
             self.handler.pausedForSeek = False
             return
+
+        if not transport_is_automatic(self.handler):
+            try:
+                note_watch_activity(self.player)
+            except Exception:
+                util.DEBUG_LOG("Passout: activity notify failed")
 
         self.idleTime = None
         self.ldTimer and self.syncTimeKeeper()
@@ -2362,6 +2454,12 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
             self.handler.player.control('play')
             return
 
+        if not transport_is_automatic(self.handler):
+            try:
+                note_watch_activity(self.player)
+            except Exception:
+                util.DEBUG_LOG("Passout: activity notify failed")
+
         self.idleTime = time.time()
         if self.resumeSeekBehindPause and not self.resumeSeekBehindAfter:
             self.seekBehind()
@@ -2371,6 +2469,11 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
 
     def onPlayBackSeek(self, stime, offset):
         util.DEBUG_LOG("SeekDialog: OnPlaybackSeek: {0}, {1}", stime, offset)
+        if not seek_event_is_automatic(self.handler):
+            try:
+                note_watch_activity(self.player)
+            except Exception:
+                util.DEBUG_LOG("Passout: activity notify failed")
         self.idleTime = None
         self.ldTimer and self.syncTimeKeeper()
 
@@ -2862,6 +2965,12 @@ class PlaylistDialog(kodigui.BaseDialog, SpoilersMixin):
             self.playlistListClicked()
 
     def onAction(self, action):
+        try:
+            handler = self.handler
+            if handler is not None:
+                note_watch_activity(handler.player, action)
+        except Exception:
+            util.DEBUG_LOG("Passout: activity notify failed")
         controlID = self.getFocusId()
         if action == xbmcgui.ACTION_MOVE_LEFT:
             if controlID == self.PLAYLIST_LIST_ID:

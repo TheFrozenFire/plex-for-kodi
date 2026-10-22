@@ -180,6 +180,7 @@ class VideoPlayerWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RolesMi
         self.rolesListControl = kodigui.ManagedControlList(self, self.ROLES_LIST_ID, 5)
 
         util.DEBUG_LOG('VideoPlayerWindow: Starting session (ID: {0})', self.sessionID)
+        player.PLAYER.on('user.activity', self.onWatchActivity)
         self.resetPassoutProtection()
         self.play(resume=self.resume)
 
@@ -204,12 +205,15 @@ class VideoPlayerWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RolesMi
             kodigui._drain_skip_rules()
         except Exception:
             util.DEBUG_LOG("Skip rules: drain failed")
+        # Pause, seek and remote keys during playback reach this window or the
+        # OSD. A post-play key still lands here. Noop is only a script-thread poke.
+        if player.action_counts_as_watch_activity(action):
+            self.resetPassoutProtection()
         try:
             if self.postPlayMode:
                 controlID = self.getFocusId()
 
                 self.cancelTimer()
-                self.resetPassoutProtection()
                 # user input means someone's actually watching
                 util.MONITOR.tv_standby = False
                 if action in(xbmcgui.ACTION_NAV_BACK, xbmcgui.ACTION_CONTEXT_MENU):
@@ -520,6 +524,9 @@ class VideoPlayerWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RolesMi
     def resetPassoutProtection(self):
         self.passoutProtection = time.time() + PASSOUT_PROTECTION_DURATION_SECONDS
 
+    def onWatchActivity(self, **kwargs):
+        self.resetPassoutProtection()
+
     def startTimer(self):
         if not util.getUserSetting('post_play_auto', True):
             util.DEBUG_LOG('Post play auto-play disabled')
@@ -533,7 +540,7 @@ class VideoPlayerWindow(kodigui.ControlledWindow, windowutils.UtilMixin, RolesMi
             return
 
         if time.time() > self.passoutProtection and self.prev.duration.asInt() > PASSOUT_LAST_VIDEO_DURATION_MILLIS:
-            util.DEBUG_LOG('Post play auto-play skipped: Passout protection')
+            util.LOG('Post play auto-play skipped: Passout protection')
             return
         else:
             millis = (self.passoutProtection - time.time()) * 1000
@@ -789,6 +796,7 @@ def play(video=None, play_queue=None, resume=False, bgm=False, **kwargs):
         player.PLAYER.off('changed.video', w.onVideoChanged)
         player.PLAYER.off('change.background', w.changeBackground)
         player.PLAYER.off('playback.failed', w.setPlaybackFailed)
+        player.PLAYER.off('user.activity', w.onWatchActivity)
         player.PLAYER.reset()
 
     if w:
