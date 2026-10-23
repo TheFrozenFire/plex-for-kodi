@@ -115,7 +115,8 @@ is `script.plexmod` and the message is `PM4K_NAV`. Kodi delivers it as
 `Other.PM4K_NAV`. `data` is one of:
 
 - `{"to":"home"}` — close PlexMod windows on top of Home, select the Home
-  section, and focus the section list
+  section, and focus the section list. A video that is playing stops first:
+  the player closes, post-play does not open, and the next item does not start
 - `{"to":"section","type":"show"}` — open the first TV Shows library, as if
   it were chosen on the home screen
 - `{"to":"section","type":"movie"}` — open the first Movies library the same
@@ -132,5 +133,5 @@ add-on does not fall back to the first library of that type.
 {"sender":"script.plexmod","message":"PM4K_NAV","data":{"to":"section","title":"TV Shows"}}
 ```
 
-Nothing happens while a video is playing. Any other payload is ignored.
-Each result is a `Remote nav:` line in the log.
+A section request does nothing while a video is playing. Any other payload
+is ignored. Each result is a `Remote nav:` line in the log.
