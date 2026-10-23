@@ -74,6 +74,24 @@ class _Window(object):
         self.clicks.append(self.sectionList.selected)
 
 
+class _StopPlayer(object):
+    def __init__(self):
+        self.sessionID = "session"
+        self.video = None
+        self.playerObject = None
+        self.currentTime = 0
+        self.lavSettingControl = None
+        self._originalAlternateSeek = False
+        self.events = []
+        self.dontRequeueBGM = False
+        self.stopped = 0
+        self.playing = False
+        self.handler = None
+
+    def trigger(self, event, **kwargs):
+        self.events.append(event)
+
+
 class RemoteNavTest(KodiTestCase):
     def setUp(self):
         super(RemoteNavTest, self).setUp()
@@ -87,6 +105,7 @@ class RemoteNavTest(KodiTestCase):
         self.poked = []
         self.playing = False
         self.overlay = False
+        self.stopped = []
         remotenav._HOOKS["home"] = lambda: self.home
         remotenav._HOOKS["playing"] = lambda: self.playing
         remotenav._HOOKS["poke"] = lambda: self.poked.append(1)
@@ -94,6 +113,11 @@ class RemoteNavTest(KodiTestCase):
         remotenav._HOOKS["close_overlays"] = lambda: self.closed.append(1)
         remotenav._HOOKS["focus_home"] = lambda home: self.focused.append(home)
         remotenav._HOOKS["open_section"] = self._open
+        remotenav._HOOKS["stop"] = self._stop
+
+    def _stop(self):
+        self.stopped.append(1)
+        self.playing = False
 
     def tearDown(self):
         remotenav._reset_for_tests()
@@ -121,20 +145,69 @@ class RemoteNavTest(KodiTestCase):
         self.assertTrue(ENV.logged("Remote nav: ok to=section type=show"))
         self.assertTrue(ENV.logged("Remote nav: ok to=section type=movie"))
 
-    def test_playing_video_is_ignored(self):
+    def test_section_request_while_playing_is_ignored(self):
         self.playing = True
-        result = remotenav.accept_notification('{"to":"home"}')
+        result = remotenav.accept_notification('{"to":"section","type":"show"}')
         self.assertIsNone(result)
+        self.assertFalse(self.opened)
+        self.assertFalse(self.stopped)
         self.assertFalse(self.focused)
-        self.assertFalse(self.closed)
         self.assertTrue(ENV.logged("Remote nav: ignored reason=playing"))
 
         self.playing = False
         remotenav._HOOKS["playing"] = None
+        remotenav._HOOKS["stop"] = None
         xbmc.Player.playing_video = True
         remotenav.accept_notification('{"to":"section","type":"movie"}')
         self.assertFalse(self.opened)
+        self.assertFalse(self.stopped)
         self.assertTrue(ENV.logged("Remote nav: ignored reason=playing"))
+        xbmc.Player.playing_video = False
+
+    def test_home_while_playing_stops_then_opens_home(self):
+        self.playing = True
+        result = remotenav.accept_notification('{"to":"home"}')
+        self.assertEqual({"ok": True, "to": "home"}, result)
+        self.assertEqual([1], self.stopped)
+        self.assertEqual([self.home], self.focused)
+        self.assertFalse(self.opened)
+        self.assertTrue(ENV.logged("Remote nav: stopped"))
+        self.assertTrue(ENV.logged("Remote nav: ok to=home"))
+        self.assertFalse(ENV.logged("Remote nav: ignored reason=playing"))
+
+    def test_home_waits_for_the_player_window_to_close(self):
+        self.playing = True
+        self.overlay = True
+
+        def close():
+            self.closed.append(1)
+            self.overlay = False
+
+        remotenav._HOOKS["close_overlays"] = close
+        first = remotenav.accept_notification('{"to":"home"}')
+        self.assertIsNone(first)
+        self.assertEqual([1], self.stopped)
+        self.assertEqual([1], self.closed)
+        self.assertFalse(self.focused)
+        self.assertTrue(ENV.logged("Remote nav: stopped"))
+        remotenav.drain()
+        self.assertEqual([self.home], self.focused)
+        self.assertTrue(ENV.logged("Remote nav: ok to=home"))
+
+    def test_home_does_not_navigate_when_playback_keeps_going(self):
+        self.playing = True
+
+        def stuck():
+            self.stopped.append(1)
+
+        remotenav._HOOKS["stop"] = stuck
+        result = remotenav.accept_notification('{"to":"home"}')
+        self.assertIsNone(result)
+        self.assertEqual([1], self.stopped)
+        self.assertFalse(self.focused)
+        self.assertFalse(self.closed)
+        self.assertTrue(ENV.logged("Remote nav: failed reason=playing"))
+        self.assertFalse(ENV.logged("Remote nav: ok to=home"))
 
     def test_bad_data_is_ignored_and_does_not_raise(self):
         samples = (
@@ -375,6 +448,72 @@ class RemoteNavTest(KodiTestCase):
         ENV.current_dialog_id = 9999
         ENV.current_window_id = 14000
         self.assertFalse(remotenav._overlays(bare))
+
+    def test_home_stop_skips_post_play_and_the_next_item(self):
+        watched = self._handler(watched=True)
+        watched.queuingNext = True
+        watched.queuingSpecific = True
+        remotenav._prepare_home_stop(watched)
+        self.assertTrue(watched.stoppedManually)
+        self.assertTrue(watched.skipPostPlay)
+        self.assertFalse(watched.queuingNext)
+        self.assertFalse(watched.queuingSpecific)
+        self.assertEqual(watched.SEEK_PLAYLIST, watched.seeking)
+        watched.onPlayBackStopped()
+        self.assertEqual([], watched.calls)
+        self.assertTrue(watched.ended)
+        self.assertEqual(["session.ended"], watched.player.events)
+
+        plain = self._handler(watched=True)
+        plain.onPlayBackStopped()
+        self.assertEqual([True], plain.calls)
+        self.assertFalse(plain.ended)
+        self.assertFalse(plain.player.events)
+
+    def test_home_stop_uses_the_player_when_no_hook_is_set(self):
+        handler = self._handler(watched=True)
+        handler.queuingNext = True
+        plex = handler.player
+        plex.handler = handler
+        plex.playing = True
+
+        def stop():
+            plex.stopped += 1
+            plex.playing = False
+            handler.onPlayBackStopped()
+
+        plex.stop = stop
+        remotenav._HOOKS["stop"] = None
+        remotenav._HOOKS["player"] = lambda: plex
+        remotenav._HOOKS["playing"] = lambda: plex.playing
+        self.assertTrue(remotenav._stop_for_home())
+        self.assertEqual(1, plex.stopped)
+        self.assertTrue(plex.dontRequeueBGM)
+        self.assertEqual([], handler.calls)
+        self.assertTrue(handler.ended)
+        self.assertEqual(["session.ended"], plex.events)
+        self.assertFalse(plex.playing)
+
+    def _handler(self, watched):
+        # Importing the player starts its monitor thread. Abort first so that
+        # thread leaves instead of spinning on the stubbed wait.
+        ENV.abort_requested = True
+        from lib.player import SeekPlayerHandler
+
+        player = _StopPlayer()
+        handler = SeekPlayerHandler(player, session_id="session")
+        handler.duration = 3600000
+        handler.getVideoWatched = lambda *args, **kwargs: watched
+        handler.hideOSD = lambda *args, **kwargs: None
+        handler.getVolume = lambda *args, **kwargs: 50
+        handler.calls = []
+
+        def follow(on_end=False):
+            handler.calls.append(on_end)
+            return True
+
+        handler.next = follow
+        return handler
 
     def test_wiring(self):
         kodigui = ast.parse(self._source("lib", "windows", "kodigui.py"), filename="lib/windows/kodigui.py")

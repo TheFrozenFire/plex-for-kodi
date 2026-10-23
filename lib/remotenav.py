@@ -6,8 +6,9 @@ with sender ``script.plexmod`` and message ``PM4K_NAV``).
 
 The script thread is the window event loop, not Python's main thread. A
 request that arrives elsewhere stays queued until the next window action,
-which records that thread and then navigates. A video that is already
-playing is left alone.
+which records that thread and then navigates. Home stops a playing video
+first, without post-play or the next item. A library request leaves that
+video alone.
 """
 from __future__ import absolute_import
 
@@ -32,6 +33,9 @@ _HOOKS = {
     "close_overlays": None,
     "focus_home": None,
     "open_section": None,
+    "stop": None,
+    "player": None,
+    "sleep": None,
 }
 
 
@@ -162,10 +166,18 @@ def _perform(request):
 
     ``defer`` means a PlexMod window is still on top of Home. Closing it
     returns to Home on the next pass; the request stays queued.
+
+    Home stops a playing video before that. Opening a library on top of a
+    stop is a different screen, so a section request still waits.
     """
     if _is_playing():
-        LOG("Remote nav: ignored reason=playing")
-        return None
+        if request.get("to") != "home":
+            LOG("Remote nav: ignored reason=playing")
+            return None
+        if not _stop_for_home():
+            LOG("Remote nav: failed reason=playing")
+            return None
+        LOG("Remote nav: stopped")
     home = _home()
     if not _ui_ready(home):
         LOG("Remote nav: failed reason=not_ready")
@@ -451,6 +463,121 @@ def _is_playing():
         return bool(xbmc.Player().isPlayingVideo())
     except Exception:
         return False
+
+
+def _stop_for_home():
+    """Stop the current video. True when it is no longer playing.
+
+    The stop callback must close the player instead of opening post-play
+    or starting the next item. ``_prepare_home_stop`` sets the flags that
+    make ``SeekPlayerHandler.onPlayBackStopped`` end the session.
+    """
+    hook = _HOOKS.get("stop")
+    if hook is not None:
+        try:
+            hook()
+        except Exception:
+            LOG("Remote nav: stop failed")
+            return False
+        return not _is_playing()
+
+    plex = _player()
+    handler = getattr(plex, "handler", None) if plex is not None else None
+    _prepare_home_stop(handler)
+    try:
+        if plex is not None and callable(getattr(plex, "stop", None)):
+            try:
+                plex.dontRequeueBGM = True
+            except Exception:
+                pass
+            plex.stop()
+        else:
+            import xbmc
+            xbmc.Player().stop()
+    except Exception:
+        LOG("Remote nav: stop failed")
+    if _is_playing():
+        _wait_until(lambda: not _is_playing())
+    _wait_for_session_end(handler)
+    if not _is_playing():
+        _end_session_if_open(handler)
+    return not _is_playing()
+
+
+def _prepare_home_stop(handler):
+    """Flags for a stop that must not follow through to another video.
+
+    A watched manual stop still opens post-play. Treating the stop as a
+    finished playlist change makes the player end the session instead.
+    Clearing the queue flags keeps ``next`` from advancing the playlist.
+    """
+    if handler is None:
+        return
+    try:
+        handler.stoppedManually = True
+        if hasattr(handler, "skipPostPlay"):
+            handler.skipPostPlay = True
+        if hasattr(handler, "queuingNext"):
+            handler.queuingNext = False
+        if hasattr(handler, "queuingSpecific"):
+            handler.queuingSpecific = False
+        playlist = getattr(handler, "SEEK_PLAYLIST", None)
+        if playlist is not None:
+            handler.seeking = playlist
+    except Exception:
+        LOG("Remote nav: stop failed")
+
+
+def _wait_for_session_end(handler):
+    """Let the stop callback close the session before a fallback does."""
+    if handler is None or not hasattr(handler, "ended"):
+        return
+    _wait_until(lambda: bool(getattr(handler, "ended", False)))
+
+
+def _end_session_if_open(handler):
+    """Close the player window when the stop callback did not."""
+    if handler is None or getattr(handler, "ended", True):
+        return
+    end = getattr(handler, "sessionEnded", None)
+    if not callable(end):
+        return
+    try:
+        end()
+    except Exception:
+        LOG("Remote nav: stop failed")
+
+
+def _player():
+    hook = _HOOKS.get("player")
+    if hook is not None:
+        return hook() if callable(hook) else hook
+    from . import player
+    return player.PLAYER
+
+
+def _wait_until(done, tries=25):
+    count = 0
+    while not done() and count < tries:
+        count += 1
+        if _sleep_once():
+            break
+    return bool(done())
+
+
+def _sleep_once():
+    hook = _HOOKS.get("sleep")
+    if hook is not None:
+        return bool(hook())
+    import xbmc
+    xbmc.sleep(100)
+    try:
+        from . import util
+        if util.MONITOR.abortRequested():
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _poke_gui():
