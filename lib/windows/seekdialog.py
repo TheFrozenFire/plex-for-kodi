@@ -565,6 +565,23 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
         # setup() will reset certain assumptions, set them here
         self.setBoolProperty("initialized", True)
 
+    def _applyMarkerAutoSkip(self, pbs, first_episode):
+        """Per-show intro and credits auto-skip, plus the session override.
+
+        The session flag forces both on for this episode. It is not written
+        back to ``pbs`` or to any setting. Transcode playback still follows
+        ``auto_skip_in_transcode``.
+        """
+        from lib import remotenav
+        allow = self.isDirectPlay or util.getUserSetting('auto_skip_in_transcode', True)
+        if not allow:
+            return
+        self.autoSkipIntro = (self.bingeMode and not first_episode) or pbs.auto_skip_intro
+        self.autoSkipCredits = self.bingeMode or pbs.auto_skip_credits
+        if remotenav.session_auto_skip_enabled():
+            self.autoSkipIntro = True
+            self.autoSkipCredits = True
+
     def setup(self, duration, meta, offset=0, bif_url=None, title='', title2='', chapters=None, keepMarkerDef=False,
               reused=False):
         """
@@ -607,9 +624,7 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
                 # don't auto skip intro when on binge mode on the first episode of a season
                 firstEp = self.player.video.index == '1'
 
-                if self.isDirectPlay or util.getUserSetting('auto_skip_in_transcode', True):
-                    self.autoSkipIntro = (self.bingeMode and not firstEp) or pbs.auto_skip_intro
-                    self.autoSkipCredits = self.bingeMode or pbs.auto_skip_credits
+                self._applyMarkerAutoSkip(pbs, firstEp)
 
                 self.showIntroSkipEarly = self.bingeMode or pbs.show_intro_skip_early
                 self.handler.skipPostPlay = self.skipPostPlay = (self.bingeMode or pbs.skip_post_play_tv)
@@ -660,6 +675,58 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
     def closeWithCommand(self, command):
         self.exitCommand = command
         self.stop()
+
+    def markerSkipActive(self):
+        """True while the Skip button applies to the current intro or credits marker.
+
+        Also true after the button has auto-hidden and the marker is OSD-only
+        (``show.markerSkip_OSDOnly``). Focus is not part of this.
+        """
+        marker_def = self._currentMarker
+        if not marker_def or not marker_def.get("marker"):
+            return False
+        kind = marker_def.get("marker_type") or getattr(marker_def.get("marker"), "type", None)
+        if kind not in ("intro", "credits"):
+            return False
+        return bool(self.getProperty("show.markerSkip") or self.getProperty("show.markerSkip_OSDOnly"))
+
+    def skipMarkerButton(self):
+        """Select the Skip button (control 791).
+
+        Same path the button uses, without requiring focus or for the button
+        to be on screen. Returns ``{"type", "final"}`` when a marker was
+        skipped, ``False`` when a seek is already being applied, and ``None``
+        when there is nothing to skip.
+        """
+        if self._applyingSeek:
+            return False
+
+        markerDef = self._currentMarker
+        if not markerDef or not markerDef.get("marker"):
+            return None
+
+        marker = markerDef["marker"]
+        final = getattr(marker, "final", False)
+        kind = markerDef.get("marker_type") or getattr(marker, "type", "")
+
+        if final:
+            self.handleFinalMarker(markerDef, immediate=False, context="MarkerSkip")
+            return {"type": kind, "final": True}
+
+        util.DEBUG_LOG('MarkerSkip: Skipping marker'
+                       ' {} (final: {}, to: {}, offset: {})'.format(markerDef["marker"],
+                                                        final, marker.endTimeOffset, MARKER_END_JUMP_OFF))
+        self.setProperty('show.markerSkip', '')
+        self.setProperty('show.markerSkip_OSDOnly', '')
+        markerDef["skipped"] = True
+        self.doSeek(marker.endTimeOffset + MARKER_END_JUMP_OFF)
+        self.hideOSD(skipMarkerFocus=True)
+
+        if marker.type == "credits":
+            # non-final marker
+            setattr(self, markerDef["markerAutoSkipShownTimer"], None)
+            self.resetAutoSeekTimer(None)
+        return {"type": kind, "final": False}
 
     def onAction(self, action):
         if xbmc.getCondVisibility('Window.IsActive(selectdialog)'):
@@ -719,31 +786,7 @@ class SeekDialog(kodigui.BaseDialog, windowutils.GoHomeMixin, PlexSubtitleDownlo
                 passThroughMain = False
                 if controlID == self.SKIP_MARKER_BUTTON_ID:
                     if action == xbmcgui.ACTION_SELECT_ITEM:
-                        if self._applyingSeek:
-                            return
-
-                        markerDef = self._currentMarker
-                        if markerDef["marker"]:
-                            marker = markerDef["marker"]
-                            final = getattr(marker, "final", False)
-
-                            if final:
-                                return self.handleFinalMarker(markerDef, immediate=False, context="MarkerSkip")
-
-                            util.DEBUG_LOG('MarkerSkip: Skipping marker'
-                                           ' {} (final: {}, to: {}, offset: {})'.format(markerDef["marker"],
-                                                                            final, marker.endTimeOffset, MARKER_END_JUMP_OFF))
-                            self.setProperty('show.markerSkip', '')
-                            self.setProperty('show.markerSkip_OSDOnly', '')
-                            markerDef["skipped"] = True
-                            self.doSeek(marker.endTimeOffset + MARKER_END_JUMP_OFF)
-                            self.hideOSD(skipMarkerFocus=True)
-
-                            if marker.type == "credits":
-                                # non-final marker
-                                setattr(self, markerDef["markerAutoSkipShownTimer"], None)
-                                self.resetAutoSeekTimer(None)
-
+                        self.skipMarkerButton()
                         return
                     elif action == xbmcgui.ACTION_MOVE_DOWN:
                         self.setProperty('show.markerSkip_OSDOnly', '1')
