@@ -123,6 +123,10 @@ is `script.plexmod` and the message is `PM4K_NAV`. Kodi delivers it as
 - `{"to":"section","title":"TV Shows"}` — open the library with that title
 - `{"to":"section","type":"movie","title":"Movies"}` — the title and the type
   both have to match
+- `{"to":"skip_marker"}` — press the playback screen's Skip button while an
+  intro or credits marker is active
+- `{"to":"auto_skip"}` — turn on intro and credits auto-skip for later
+  episodes in this Kodi session. `{"to":"auto_skip","on":false}` turns it off
 
 `title` matches the library title exactly, ignoring case and surrounding
 whitespace. If a title is set and no library matches, nothing opens. The
@@ -132,5 +136,40 @@ add-on does not fall back to the first library of that type.
 {"sender":"script.plexmod","message":"PM4K_NAV","data":{"to":"section","title":"TV Shows"}}
 ```
 
-Nothing happens while a video is playing. Any other payload is ignored.
-Each result is a `Remote nav:` line in the log.
+Home and library navigation do nothing while a video is playing. Any other
+payload is ignored. Each result is a `Remote nav:` line in the log.
+
+## Skip the active marker
+
+`skip_marker` runs the playback screen's own Skip button (control 791). It
+does not depend on which control has focus, or on the button still being on
+screen. An intro or credits marker still counts after the button has hidden
+itself and the marker is OSD-only (`show.markerSkip_OSDOnly`). A final
+credits marker takes the same path as the button (post-play, or the next
+episode). If no marker is active, nothing happens and the log says
+`Remote nav: ignored reason=no_marker`.
+
+```json
+{"jsonrpc":"2.0","method":"JSONRPC.NotifyAll","id":1,"params":{"sender":"script.plexmod","message":"PM4K_NAV","data":{"to":"skip_marker"}}}
+```
+
+A skip is `Remote nav: ok to=skip_marker type=intro` or `type=credits`. A
+final credits marker adds `final=1`.
+
+## Session auto-skip
+
+`auto_skip` turns on intro and credits auto-skip for episode playback that
+starts after the command. The episode already playing is unchanged. The
+choice lasts for this Kodi session only. It is not written to a show's
+playback settings. Sending it again with `"on":false` turns it off.
+`on` may be omitted (on), or `true` / `false`.
+
+```json
+{"jsonrpc":"2.0","method":"JSONRPC.NotifyAll","id":1,"params":{"sender":"script.plexmod","message":"PM4K_NAV","data":{"to":"auto_skip"}}}
+```
+
+```json
+{"jsonrpc":"2.0","method":"JSONRPC.NotifyAll","id":1,"params":{"sender":"script.plexmod","message":"PM4K_NAV","data":{"to":"auto_skip","on":false}}}
+```
+
+The log line is `Remote nav: ok to=auto_skip on=1` or `on=0`.

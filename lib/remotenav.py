@@ -6,8 +6,13 @@ with sender ``script.plexmod`` and message ``PM4K_NAV``).
 
 The script thread is the window event loop, not Python's main thread. A
 request that arrives elsewhere stays queued until the next window action,
-which records that thread and then navigates. A video that is already
-playing is left alone.
+which records that thread and then navigates. Home and library navigation
+leave a video that is already playing alone.
+
+``skip_marker`` is the playback screen's Skip button. It runs only while an
+intro or credits marker is active, including after that button has hidden
+and the marker is OSD-only. ``auto_skip`` turns intro and credits auto-skip
+on for later episode playback in this Kodi session. It is not saved.
 """
 from __future__ import absolute_import
 
@@ -21,6 +26,11 @@ _QUEUED = []
 _BUSY = False
 _APPLYING = False
 _MAX_DEFER = 3
+# Intro and credits auto-skip for later episodes. Memory only; not a setting.
+_SESSION_AUTO_SKIP = False
+
+_ON_TRUE = ("1", "true", "yes", "on")
+_ON_FALSE = ("0", "false", "no", "off")
 
 # Tests replace entries. None means the real Kodi / window implementation.
 _HOOKS = {
@@ -32,17 +42,29 @@ _HOOKS = {
     "close_overlays": None,
     "focus_home": None,
     "open_section": None,
+    "playback": None,
 }
 
 
 def _reset_for_tests():
-    global _BUSY, _APPLYING
+    global _BUSY, _APPLYING, _SESSION_AUTO_SKIP
     with _LOCK:
         _BUSY = False
         _APPLYING = False
+        _SESSION_AUTO_SKIP = False
         del _QUEUED[:]
     for key in _HOOKS:
         _HOOKS[key] = None
+
+
+def session_auto_skip_enabled():
+    """True when this Kodi session should auto-skip intro and credits.
+
+    Episode playback reads this when it starts. Nothing writes it to the
+    per-show playback settings.
+    """
+    with _LOCK:
+        return _SESSION_AUTO_SKIP
 
 
 def parse_notification(data):
@@ -53,6 +75,15 @@ def parse_notification(data):
     dest = str(payload.get("to") or "").strip().lower()
     if dest == "home":
         return {"to": "home"}
+    if dest == "skip_marker":
+        return {"to": "skip_marker"}
+    if dest == "auto_skip":
+        if "on" not in payload:
+            return {"to": "auto_skip", "on": True}
+        enabled = _parse_on(payload.get("on"))
+        if enabled is None:
+            return None
+        return {"to": "auto_skip", "on": enabled}
     if dest != "section":
         return None
     kind = str(payload.get("type") or "").strip().lower()
@@ -148,9 +179,12 @@ def nudge():
 def _valid(request):
     if not isinstance(request, dict):
         return False
-    if request.get("to") == "home":
+    dest = request.get("to")
+    if dest in ("home", "skip_marker"):
         return True
-    if request.get("to") != "section":
+    if dest == "auto_skip":
+        return isinstance(request.get("on", True), bool)
+    if dest != "section":
         return False
     if request.get("title"):
         return True
@@ -163,6 +197,10 @@ def _perform(request):
     ``defer`` means a PlexMod window is still on top of Home. Closing it
     returns to Home on the next pass; the request stays queued.
     """
+    if request["to"] == "skip_marker":
+        return ("skip_marker",)
+    if request["to"] == "auto_skip":
+        return ("auto_skip", bool(request.get("on", True)))
     if _is_playing():
         LOG("Remote nav: ignored reason=playing")
         return None
@@ -198,6 +236,10 @@ def _finish(action, request):
             _QUEUED.insert(0, request)
         _poke_gui()
         return None
+    if kind == "skip_marker":
+        return _finish_skip_marker()
+    if kind == "auto_skip":
+        return _finish_auto_skip(action[1])
     if kind == "focus":
         with _LOCK:
             _APPLYING = True
@@ -233,6 +275,89 @@ def _finish(action, request):
         return _section_result(True, "opened", spec)
     LOG("Remote nav: failed reason=no_section {0}", detail)
     return _section_result(False, "no_section", spec)
+
+
+def _finish_skip_marker():
+    """Press the playback screen's Skip button, whatever has focus."""
+    global _APPLYING
+    dialog = _playback_dialog()
+    try:
+        active = bool(dialog and dialog.markerSkipActive())
+    except Exception:
+        LOG("Remote nav: failed reason=error")
+        return None
+    if not active:
+        LOG("Remote nav: ignored reason=no_marker")
+        return None
+    with _LOCK:
+        _APPLYING = True
+    try:
+        try:
+            outcome = dialog.skipMarkerButton()
+        except Exception:
+            LOG("Remote nav: failed reason=error")
+            return None
+    finally:
+        with _LOCK:
+            _APPLYING = False
+    if outcome is False:
+        LOG("Remote nav: ignored reason=busy")
+        return None
+    if not isinstance(outcome, dict):
+        LOG("Remote nav: ignored reason=no_marker")
+        return None
+    kind = str(outcome.get("type") or "")
+    final = bool(outcome.get("final"))
+    detail = "type={0}".format(kind) if kind else ""
+    if final:
+        detail = (detail + " final=1").strip()
+    if detail:
+        LOG("Remote nav: ok to=skip_marker {0}", detail)
+    else:
+        LOG("Remote nav: ok to=skip_marker")
+    result = {"ok": True, "to": "skip_marker"}
+    if kind:
+        result["type"] = kind
+    if final:
+        result["final"] = True
+    return result
+
+
+def _finish_auto_skip(enabled):
+    global _SESSION_AUTO_SKIP
+    enabled = bool(enabled)
+    with _LOCK:
+        _SESSION_AUTO_SKIP = enabled
+    LOG("Remote nav: ok to=auto_skip on={0}", 1 if enabled else 0)
+    return {"ok": True, "to": "auto_skip", "on": enabled}
+
+
+def _playback_dialog():
+    """The open playback screen, or None when nothing is playing there."""
+    hook = _HOOKS.get("playback")
+    if hook is not None:
+        return hook() if callable(hook) else hook
+    from . import player
+    handler = getattr(player.PLAYER, "handler", None)
+    if handler is None:
+        return None
+    return getattr(handler, "dialog", None)
+
+
+def _parse_on(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if value in (0, 1):
+            return bool(value)
+        return None
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in _ON_TRUE:
+            return True
+        if text in _ON_FALSE:
+            return False
+    return None
 
 
 def _focus_home(home):

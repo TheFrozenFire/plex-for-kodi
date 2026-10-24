@@ -10,6 +10,7 @@ import xbmc
 from kodienv import ENV
 
 from lib import hubrefresh, monitor, remotenav
+from lib.windows.seekdialog import MARKER_END_JUMP_OFF, SeekDialog
 
 from .base import KodiTestCase, REPO_ROOT
 
@@ -402,8 +403,445 @@ class RemoteNavTest(KodiTestCase):
         source = self._source("lib", "monitor.py")
         self.assertIn("PM4K_NAV", source)
         self.assertIn("remotenav", source)
-        self.assertIn("PM4K_NAV", self._source("docs", "remote-play.md"))
+        doc = self._source("docs", "remote-play.md")
+        self.assertIn("PM4K_NAV", doc)
+        self.assertIn('"to":"skip_marker"', doc)
+        self.assertIn('"to":"auto_skip"', doc)
+        self.assertIn("show.markerSkip_OSDOnly", doc)
 
     def _source(self, *parts):
         with open(os.path.join(REPO_ROOT, *parts), encoding="utf-8") as handle:
             return handle.read()
+
+
+class _Marker(object):
+    def __init__(self, kind, end, final=False):
+        self.type = kind
+        self.endTimeOffset = end
+        self.final = final
+
+    def __str__(self):
+        return "{0}@{1}".format(self.type, self.endTimeOffset)
+
+
+class _Playback(object):
+    """Stand-in playback screen. Skip uses SeekDialog's own methods."""
+
+    def __init__(self):
+        self._applyingSeek = False
+        self._currentMarker = None
+        self.props = {}
+        self.sought = []
+        self.hidden = []
+        self.finals = []
+        self.resets = []
+        self.skip_calls = []
+        self._introSkipShownStarted = "shown"
+        self._creditsSkipShownStarted = "shown"
+
+    def getProperty(self, key):
+        return self.props.get(key, "")
+
+    def setProperty(self, key, value):
+        self.props[key] = value
+
+    def getFocusId(self):
+        raise AssertionError("skip must not ask who has focus")
+
+    def doSeek(self, offset=None, settings_changed=False, skip_alt_seek_fix=False):
+        self.sought.append(offset)
+
+    def hideOSD(self, skipMarkerFocus=False, closing=False):
+        self.hidden.append(skipMarkerFocus)
+
+    def handleFinalMarker(self, marker_def, immediate=False, context="MarkerAutoSkip"):
+        self.finals.append((immediate, context))
+        return True
+
+    def resetAutoSeekTimer(self, value="not_set"):
+        self.resets.append(value)
+
+    def markerSkipActive(self):
+        return SeekDialog.markerSkipActive(self)
+
+    def skipMarkerButton(self):
+        self.skip_calls.append(1)
+        return SeekDialog.skipMarkerButton(self)
+
+    def show_marker(self, kind, end, final=False, visible=True, osd_only=False):
+        self._currentMarker = {
+            "marker": _Marker(kind, end, final=final),
+            "marker_type": kind,
+            "skipped": False,
+            "markerAutoSkipShownTimer": "_creditsSkipShownStarted" if kind == "credits" else "_introSkipShownStarted",
+        }
+        self.props["show.markerSkip"] = "1" if visible else ""
+        self.props["show.markerSkip_OSDOnly"] = "1" if osd_only else ""
+
+
+class _ShowSettings(object):
+    def __init__(self, intro=False, credits=False):
+        self.auto_skip_intro = intro
+        self.auto_skip_credits = credits
+
+
+class MarkerSkipNavTest(KodiTestCase):
+    def _source(self, *parts):
+        with open(os.path.join(REPO_ROOT, *parts), encoding="utf-8") as handle:
+            return handle.read()
+
+    def setUp(self):
+        super(MarkerSkipNavTest, self).setUp()
+        remotenav._reset_for_tests()
+        hubrefresh.reset()
+        hubrefresh.note_script_thread()
+        self.screen = _Playback()
+        self.playing = False
+        remotenav._HOOKS["playing"] = lambda: self.playing
+        remotenav._HOOKS["playback"] = lambda: self.screen
+        remotenav._HOOKS["poke"] = lambda: None
+        remotenav._HOOKS["home"] = lambda: None
+
+    def tearDown(self):
+        remotenav._reset_for_tests()
+        hubrefresh.reset()
+        super(MarkerSkipNavTest, self).tearDown()
+
+    def test_skip_marker_uses_the_skip_button_path_while_playing(self):
+        self.playing = True
+        self.screen.show_marker("intro", 90000)
+        result = remotenav.accept_notification('{"to": "Skip_Marker"}')
+        self.assertEqual({"ok": True, "to": "skip_marker", "type": "intro"}, result)
+        self.assertEqual([1], self.screen.skip_calls)
+        self.assertEqual([90000 + MARKER_END_JUMP_OFF], self.screen.sought)
+        self.assertEqual([True], self.screen.hidden)
+        self.assertFalse(self.screen.finals)
+        self.assertFalse(self.screen.resets)
+        self.assertTrue(self.screen._currentMarker["skipped"])
+        self.assertEqual("", self.screen.props["show.markerSkip"])
+        self.assertEqual("", self.screen.props["show.markerSkip_OSDOnly"])
+        self.assertTrue(ENV.logged("Remote nav: ok to=skip_marker type=intro"))
+
+    def test_osd_only_marker_still_skips(self):
+        self.playing = True
+        self.screen.show_marker("credits", 500000, visible=False, osd_only=True)
+        result = remotenav.accept_notification({"to": "skip_marker"})
+        self.assertEqual("credits", result["type"])
+        self.assertNotIn("final", result)
+        self.assertEqual([500000 + MARKER_END_JUMP_OFF], self.screen.sought)
+        self.assertEqual([None], self.screen.resets)
+        self.assertIsNone(self.screen._creditsSkipShownStarted)
+        self.assertTrue(ENV.logged("Remote nav: ok to=skip_marker type=credits"))
+
+    def test_visible_and_osd_only_together_still_skips(self):
+        self.screen.show_marker("intro", 1000, visible=True, osd_only=True)
+        result = remotenav.accept_notification('{"to":"skip_marker"}')
+        self.assertTrue(result["ok"])
+        self.assertEqual([1000 + MARKER_END_JUMP_OFF], self.screen.sought)
+
+    def test_final_credits_follow_the_skip_button(self):
+        self.playing = True
+        self.screen.show_marker("credits", 1_200_000, final=True, osd_only=True, visible=False)
+        result = remotenav.accept_notification('{"to":"skip_marker"}')
+        self.assertEqual(
+            {"ok": True, "to": "skip_marker", "type": "credits", "final": True},
+            result,
+        )
+        self.assertEqual([(False, "MarkerSkip")], self.screen.finals)
+        self.assertFalse(self.screen.sought)
+        self.assertFalse(self.screen.hidden)
+        self.assertFalse(self.screen._currentMarker["skipped"])
+        self.assertEqual("1", self.screen.props["show.markerSkip_OSDOnly"])
+        self.assertTrue(ENV.logged("Remote nav: ok to=skip_marker type=credits final=1"))
+
+    def test_no_marker_does_nothing(self):
+        self.playing = True
+        self.assertIsNone(remotenav.accept_notification('{"to":"skip_marker"}'))
+        self.screen._currentMarker = {"marker": _Marker("intro", 10), "marker_type": "intro", "skipped": False}
+        self.assertIsNone(remotenav.accept_notification('{"to":"skip_marker"}'))
+        self.screen.props["show.markerSkip"] = "1"
+        self.screen._currentMarker["marker_type"] = "chapter"
+        self.screen._currentMarker["marker"].type = "chapter"
+        self.assertIsNone(remotenav.accept_notification('{"to":"skip_marker"}'))
+        self.assertFalse(self.screen.skip_calls)
+        self.assertFalse(self.screen.sought)
+        self.assertFalse(self.screen.finals)
+        self.assertTrue(ENV.logged("Remote nav: ignored reason=no_marker"))
+
+    def test_missing_playback_screen_is_no_marker(self):
+        remotenav._HOOKS["playback"] = lambda: None
+        self.assertIsNone(remotenav.accept_notification('{"to":"skip_marker"}'))
+        self.assertTrue(ENV.logged("Remote nav: ignored reason=no_marker"))
+
+    def test_busy_seek_does_not_skip(self):
+        self.screen.show_marker("intro", 40000)
+        self.screen._applyingSeek = True
+        self.assertIsNone(remotenav.accept_notification('{"to":"skip_marker"}'))
+        self.assertEqual([1], self.screen.skip_calls)
+        self.assertFalse(self.screen.sought)
+        self.assertTrue(ENV.logged("Remote nav: ignored reason=busy"))
+
+    def test_skip_errors_do_not_escape(self):
+        def boom():
+            raise RuntimeError("marker")
+
+        self.screen.markerSkipActive = boom
+        self.assertIsNone(remotenav.accept_notification('{"to":"skip_marker"}'))
+        self.assertTrue(ENV.logged("Remote nav: failed reason=error"))
+
+        self.screen.markerSkipActive = lambda: True
+        self.screen.skipMarkerButton = boom
+        self.assertIsNone(remotenav.accept_notification('{"to":"skip_marker"}'))
+
+    def test_skip_waits_for_the_script_thread(self):
+        self.screen.show_marker("intro", 25000)
+        remotenav._HOOKS["on_gui"] = lambda: False
+        remotenav.accept_notification('{"to":"skip_marker"}')
+        self.assertFalse(self.screen.skip_calls)
+        remotenav._HOOKS["on_gui"] = None
+        remotenav.drain()
+        self.assertEqual([1], self.screen.skip_calls)
+        self.assertEqual([25000 + MARKER_END_JUMP_OFF], self.screen.sought)
+
+    def test_home_is_still_ignored_while_playing(self):
+        self.playing = True
+        self.screen.show_marker("intro", 1000)
+        focused = []
+        remotenav._HOOKS["focus_home"] = lambda home: focused.append(home)
+        self.assertIsNone(remotenav.accept_notification('{"to":"home"}'))
+        self.assertFalse(focused)
+        self.assertFalse(self.screen.sought)
+        self.assertTrue(ENV.logged("Remote nav: ignored reason=playing"))
+        skipped = remotenav.accept_notification('{"to":"skip_marker"}')
+        self.assertEqual("intro", skipped["type"])
+
+    def test_monitor_dispatches_skip_marker(self):
+        self.screen.show_marker("intro", 10)
+        monitor.MONITOR.onNotification("script.plexmod", "Other.PM4K_NAV", '{"to":"skip_marker"}')
+        self.assertEqual([1], self.screen.skip_calls)
+        self.screen.skip_calls[:] = []
+        monitor.MONITOR.onNotification("xbmc", "Other.PM4K_NAV", '{"to":"skip_marker"}')
+        self.assertFalse(self.screen.skip_calls)
+
+    def test_playback_dialog_comes_from_the_player(self):
+        import sys
+        import types
+
+        import lib
+
+        remotenav._HOOKS["playback"] = None
+        sentinel = object()
+        fake = types.ModuleType("lib.player")
+        fake.PLAYER = type("Player", (), {"handler": type("Handler", (), {"dialog": sentinel})()})()
+        previous_mod = sys.modules.get("lib.player")
+        previous_attr = getattr(lib, "player", None)
+        sys.modules["lib.player"] = fake
+        lib.player = fake
+        try:
+            self.assertIs(sentinel, remotenav._playback_dialog())
+            fake.PLAYER.handler = type("Handler", (), {})()
+            self.assertIsNone(remotenav._playback_dialog())
+            fake.PLAYER.handler = None
+            self.assertIsNone(remotenav._playback_dialog())
+        finally:
+            if previous_mod is None:
+                sys.modules.pop("lib.player", None)
+            else:
+                sys.modules["lib.player"] = previous_mod
+            if previous_attr is None:
+                if hasattr(lib, "player"):
+                    delattr(lib, "player")
+            else:
+                lib.player = previous_attr
+
+    def test_skip_button_handler_calls_the_shared_method(self):
+        tree = ast.parse(self._source("lib", "windows", "seekdialog.py"), filename="lib/windows/seekdialog.py")
+        seek = None
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef) and node.name == "SeekDialog":
+                seek = node
+        on_action = None
+        skip = None
+        for node in seek.body:
+            if isinstance(node, ast.FunctionDef) and node.name == "onAction":
+                on_action = node
+            elif isinstance(node, ast.FunctionDef) and node.name == "skipMarkerButton":
+                skip = node
+        button_calls = [
+            child for child in ast.walk(on_action)
+            if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
+            and child.func.attr == "skipMarkerButton"
+        ]
+        self.assertEqual(1, len(button_calls))
+        select_body = None
+        for child in ast.walk(on_action):
+            if not isinstance(child, ast.If) or not child.body:
+                continue
+            first = child.body[0]
+            if (isinstance(first, ast.Expr) and isinstance(first.value, ast.Call)
+                    and isinstance(first.value.func, ast.Attribute)
+                    and first.value.func.attr == "skipMarkerButton"):
+                select_body = child.body
+        self.assertIsNotNone(select_body)
+        self.assertIsInstance(select_body[1], ast.Return)
+        direct_final = [
+            child for child in ast.walk(on_action)
+            if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
+            and child.func.attr == "handleFinalMarker"
+        ]
+        self.assertFalse(direct_final)
+        called = [
+            child.func.attr for child in ast.walk(skip)
+            if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
+        ]
+        self.assertIn("handleFinalMarker", called)
+        self.assertIn("doSeek", called)
+        self.assertIn("hideOSD", called)
+
+
+class SessionAutoSkipTest(KodiTestCase):
+    def _source(self, *parts):
+        with open(os.path.join(REPO_ROOT, *parts), encoding="utf-8") as handle:
+            return handle.read()
+
+    def setUp(self):
+        super(SessionAutoSkipTest, self).setUp()
+        remotenav._reset_for_tests()
+        hubrefresh.reset()
+        hubrefresh.note_script_thread()
+        remotenav._HOOKS["poke"] = lambda: None
+        self.saved = []
+        self._set_setting = None
+
+    def tearDown(self):
+        if self._set_setting is not None:
+            from lib.windows import seekdialog
+            seekdialog.util.setSetting = self._set_setting
+        remotenav._reset_for_tests()
+        hubrefresh.reset()
+        super(SessionAutoSkipTest, self).tearDown()
+
+    def _watch_settings(self):
+        from lib.windows import seekdialog
+        self._set_setting = seekdialog.util.setSetting
+
+        def remember(key, value, addon=None):
+            self.saved.append((key, value))
+            return self._set_setting(key, value, addon)
+
+        seekdialog.util.setSetting = remember
+
+    def _episode(self, direct=True, binge=False):
+        screen = type("Screen", (), {})()
+        screen.isDirectPlay = direct
+        screen.bingeMode = binge
+        screen.autoSkipIntro = False
+        screen.autoSkipCredits = False
+        return screen
+
+    def test_auto_skip_turns_on_for_later_episodes_only_in_memory(self):
+        self._watch_settings()
+        screen = self._episode()
+        settings = _ShowSettings()
+        SeekDialog._applyMarkerAutoSkip(screen, settings, False)
+        self.assertFalse(screen.autoSkipIntro)
+        self.assertFalse(screen.autoSkipCredits)
+
+        enabled = remotenav.accept_notification('{"to":"auto_skip"}')
+        self.assertEqual({"ok": True, "to": "auto_skip", "on": True}, enabled)
+        self.assertTrue(remotenav.session_auto_skip_enabled())
+        self.assertTrue(ENV.logged("Remote nav: ok to=auto_skip on=1"))
+        # The screen already playing keeps the choice it started with.
+        self.assertFalse(screen.autoSkipIntro)
+
+        later = self._episode()
+        SeekDialog._applyMarkerAutoSkip(later, settings, False)
+        self.assertTrue(later.autoSkipIntro)
+        self.assertTrue(later.autoSkipCredits)
+        self.assertFalse(settings.auto_skip_intro)
+        self.assertFalse(settings.auto_skip_credits)
+        self.assertFalse(self.saved)
+
+        again = remotenav.accept_notification('{"to":"auto_skip","on":true}')
+        self.assertTrue(again["on"])
+        disabled = remotenav.accept_notification('{"to":"auto_skip","on":false}')
+        self.assertEqual({"ok": True, "to": "auto_skip", "on": False}, disabled)
+        self.assertFalse(remotenav.session_auto_skip_enabled())
+        self.assertTrue(ENV.logged("Remote nav: ok to=auto_skip on=0"))
+        after = self._episode()
+        SeekDialog._applyMarkerAutoSkip(after, _ShowSettings(intro=True), False)
+        self.assertTrue(after.autoSkipIntro)
+        self.assertFalse(after.autoSkipCredits)
+
+    def test_session_flag_overrides_the_first_episode_exception(self):
+        screen = self._episode(binge=True)
+        SeekDialog._applyMarkerAutoSkip(screen, _ShowSettings(), True)
+        self.assertFalse(screen.autoSkipIntro)
+        self.assertTrue(screen.autoSkipCredits)
+
+        remotenav.accept_notification('{"to":"auto_skip"}')
+        later = self._episode(binge=True)
+        SeekDialog._applyMarkerAutoSkip(later, _ShowSettings(), True)
+        self.assertTrue(later.autoSkipIntro)
+        self.assertTrue(later.autoSkipCredits)
+
+    def test_transcode_still_obeys_the_existing_gate(self):
+        from lib.windows import seekdialog
+        original = seekdialog.util.getUserSetting
+
+        def setting(key, default=None):
+            if key == "auto_skip_in_transcode":
+                return False
+            return default
+
+        seekdialog.util.getUserSetting = setting
+        try:
+            remotenav.accept_notification('{"to":"auto_skip"}')
+            screen = self._episode(direct=False)
+            SeekDialog._applyMarkerAutoSkip(screen, _ShowSettings(intro=True, credits=True), False)
+            self.assertFalse(screen.autoSkipIntro)
+            self.assertFalse(screen.autoSkipCredits)
+        finally:
+            seekdialog.util.getUserSetting = original
+
+    def test_bad_auto_skip_value_is_ignored(self):
+        self.assertIsNone(remotenav.accept_notification('{"to":"auto_skip","on":"maybe"}'))
+        self.assertFalse(remotenav.session_auto_skip_enabled())
+        self.assertTrue(ENV.logged("Remote nav: ignored reason=bad_request"))
+        remotenav.accept_notification('{"to":"auto_skip","on":0}')
+        self.assertFalse(remotenav.session_auto_skip_enabled())
+        remotenav.accept_notification('{"to":"auto_skip","on":"off"}')
+        self.assertFalse(remotenav.session_auto_skip_enabled())
+        remotenav.accept_notification('{"to":"auto_skip","on":1}')
+        self.assertTrue(remotenav.session_auto_skip_enabled())
+        remotenav.accept_notification('{"to":"auto_skip","on":"no"}')
+        self.assertFalse(remotenav.session_auto_skip_enabled())
+
+    def test_auto_skip_waits_for_the_script_thread(self):
+        remotenav._HOOKS["on_gui"] = lambda: False
+        remotenav.accept_notification('{"to":"auto_skip"}')
+        self.assertFalse(remotenav.session_auto_skip_enabled())
+        remotenav._HOOKS["on_gui"] = None
+        remotenav.drain()
+        self.assertTrue(remotenav.session_auto_skip_enabled())
+
+    def test_setup_applies_marker_auto_skip_for_episodes(self):
+        tree = ast.parse(self._source("lib", "windows", "seekdialog.py"), filename="lib/windows/seekdialog.py")
+        setup = None
+        apply = None
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            if node.name == "setup":
+                setup = node
+            elif node.name == "_applyMarkerAutoSkip":
+                apply = node
+        called = [
+            child.func.attr for child in ast.walk(setup)
+            if isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
+        ]
+        self.assertIn("_applyMarkerAutoSkip", called)
+        attrs = [child.attr for child in ast.walk(apply) if isinstance(child, ast.Attribute)]
+        self.assertIn("session_auto_skip_enabled", attrs)
+        self.assertNotIn("setSetting", attrs)
+        self.assertNotIn("save", attrs)
