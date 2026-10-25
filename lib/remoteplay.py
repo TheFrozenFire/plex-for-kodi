@@ -8,6 +8,9 @@ announcement and exits, so it does not open another UI.
 Workers are not used. The script thread is the window event loop, not
 Python's main thread. A request that arrives elsewhere stays queued until
 the next window action, which records that thread and then plays.
+
+Busy covers startup only. Once playback has started, a new request stops
+the current item (Plex keeps the resume point) and plays that request.
 """
 from __future__ import absolute_import
 
@@ -24,7 +27,18 @@ _STOP_TRIES = 25
 
 _LOCK = threading.Lock()
 _QUEUED = []
+# True from accept until playback starts, or until the attempt fails.
 _BUSY = False
+# True after playback starts, until that player window has unwound.
+_IN_PLAYBACK = False
+# True while _drive is on the stack, so a nested request cannot open another player.
+_DRIVING = False
+# One clean stop per session. A second request must not stop twice.
+_STOP_REQUESTED = False
+# Request whose playback we are waiting on. None once that wait is over.
+_ARMED = None
+# av.started slot, while subscribed.
+_AV_SLOT = None
 
 # Tests replace entries. None means the real Kodi / plexnet implementation.
 _HOOKS = {
@@ -41,14 +55,20 @@ _HOOKS = {
     "running": None,
     "notify": None,
     "on_gui": None,
+    "player": None,
 }
 
 
 def _reset_for_tests():
-    global _BUSY
+    global _BUSY, _IN_PLAYBACK, _DRIVING, _STOP_REQUESTED, _ARMED, _AV_SLOT
     with _LOCK:
         _BUSY = False
+        _IN_PLAYBACK = False
+        _DRIVING = False
+        _STOP_REQUESTED = False
+        _ARMED = None
         del _QUEUED[:]
+    _AV_SLOT = None
     for key in _HOOKS:
         _HOOKS[key] = None
 
@@ -165,29 +185,134 @@ def accept_notification(data):
 
 
 def submit(request):
-    """Play ``request`` on the script thread, or queue it until then."""
+    """Play ``request`` on the script thread, or queue it until then.
+
+    After playback has started, a new request stops the current item and
+    plays in its place. Until playback starts, the in-flight request stays busy.
+    """
     if not isinstance(request, dict) or not request.get("ratingKey"):
         result = _result(False, "bad_request", request.get("id", "") if isinstance(request, dict) else "", "", "", "")
         _publish(result)
         return result
     if not _on_gui_thread():
         with _LOCK:
+            if _IN_PLAYBACK:
+                request = dict(request)
+                request["_replace"] = True
             _QUEUED.append(request)
         _poke_gui()
         return None
-    return _run(request)
+    return _drive(request)
 
 
 def drain():
     """Play queued requests. Only the script thread may call this."""
     if not _on_gui_thread():
         return
-    while True:
-        with _LOCK:
-            if _BUSY or not _QUEUED:
-                return
-            request = _QUEUED.pop(0)
-        _run(request)
+    _drive(None)
+
+
+def _drive(request):
+    """Run ``request`` and then anything queued to replace it.
+
+    A nested call (notification or window action while a player window is
+    already inside this function) must not open a second player on top of
+    the first. It only queues a replacement and stops the current item.
+    """
+    global _DRIVING
+    if _DRIVING:
+        if request is not None:
+            return _accept(request)
+        _stop_if_replacement_waiting()
+        return None
+    _DRIVING = True
+    try:
+        result = None
+        if request is not None:
+            result = _accept(request)
+        while True:
+            nxt = _pop_ready()
+            if nxt is None:
+                return result
+            result = _accept(nxt)
+    finally:
+        _DRIVING = False
+
+
+def _pop_ready():
+    with _LOCK:
+        if _BUSY or _IN_PLAYBACK or not _QUEUED:
+            return None
+        return _QUEUED.pop(0)
+
+
+def _accept(request):
+    """Play ``request``, or refuse it, or defer it until the current item stops."""
+    global _BUSY
+    with _LOCK:
+        playing = _IN_PLAYBACK
+        if not playing and _BUSY:
+            busy = True
+        else:
+            busy = False
+            if not playing:
+                _BUSY = True
+    if busy:
+        result = _result(False, "busy", request.get("id", ""), request.get("ratingKey", ""), "", "")
+        _publish(result)
+        LOG("Remote play: failed reason=busy")
+        return result
+    if playing:
+        return _defer_replacement(request)
+    _publish(_pending(request), notify=False)
+    try:
+        _take_request(request.get("id") or "")
+    except Exception:
+        pass
+    try:
+        return _perform(request)
+    finally:
+        _finish_session()
+
+
+def _defer_replacement(request):
+    """Stop the current item and play ``request`` after that window unwinds."""
+    queued = dict(request)
+    queued["_replace"] = True
+    with _LOCK:
+        _QUEUED.append(queued)
+    _publish(_pending(queued), notify=False)
+    _stop_for_replace()
+    return _pending(queued)
+
+
+def _finish_session():
+    global _BUSY, _IN_PLAYBACK, _STOP_REQUESTED
+    _disarm_playback()
+    with _LOCK:
+        _BUSY = False
+        _IN_PLAYBACK = False
+        _STOP_REQUESTED = False
+
+
+def _stop_if_replacement_waiting():
+    with _LOCK:
+        waiting = _IN_PLAYBACK and any(item.get("_replace") for item in _QUEUED)
+    if waiting:
+        _stop_for_replace()
+
+
+def _stop_for_replace():
+    global _STOP_REQUESTED
+    with _LOCK:
+        if _STOP_REQUESTED or not _IN_PLAYBACK:
+            return
+        _STOP_REQUESTED = True
+    LOG("Remote play: replacing")
+    try:
+        _stop_playback()
+    except Exception:
+        LOG("Remote play: stop failed")
 
 
 def playback_kwargs(request):
@@ -206,34 +331,13 @@ def playback_kwargs(request):
     return kwargs
 
 
-def _run(request):
-    global _BUSY
-    with _LOCK:
-        if _BUSY:
-            result = _result(False, "busy", request.get("id", ""), request.get("ratingKey", ""), "", "")
-            _publish(result)
-            LOG("Remote play: failed reason=busy")
-            return result
-        _BUSY = True
-    _publish(_pending(request), notify=False)
-    try:
-        _take_request(request.get("id") or "")
-    except Exception:
-        pass
-    try:
-        return _perform(request)
-    finally:
-        with _LOCK:
-            _BUSY = False
-
-
 def _perform(request):
     ident = request.get("id", "")
     requested = request.get("ratingKey", "")
     if not _ui_ready():
         return _fail(request, "not_ready")
     if _is_playing():
-        if not request.get("force"):
+        if not request.get("force") and not request.get("_replace"):
             return _fail(request, "playing")
         _stop_playback()
         if not _wait_until_stopped():
@@ -263,21 +367,104 @@ def _perform(request):
         return _fail(request, "unavailable")
     _wake()
     _dismiss_dialogs()
+    _arm_playback(request, playable)
+    failed = None
     try:
-        opened = _open(playable, request)
-    except Exception as exc:
-        if exc.__class__.__name__ == "NoDataException":
+        try:
+            opened = _open(playable, request)
+        except Exception as exc:
+            failed = exc
+            opened = None
+    finally:
+        started = _session_started()
+        _disarm_playback()
+    if failed is not None:
+        if failed.__class__.__name__ == "NoDataException":
             return _fail(request, "not_found")
-        LOG("Remote play: failed reason=error kind={0}", exc.__class__.__name__)
+        LOG("Remote play: failed reason=error kind={0}", failed.__class__.__name__)
         return _fail(request, "error")
     if opened == "NODATA":
         return _fail(request, "not_found")
     kind = _kind(playable)
     played = _rating_of(playable)
     result = _result(True, "started", ident, requested, played, kind)
+    if started:
+        # Published when playback started. The player window has now closed.
+        return result
     _publish(result)
     LOG("Remote play: ok type={0}", kind or "item")
     return result
+
+
+def _session_started():
+    with _LOCK:
+        return _IN_PLAYBACK
+
+
+def _arm_playback(request, playable):
+    """Remember ``request`` so the start signal can publish it."""
+    global _ARMED
+    _ARMED = {
+        "id": request.get("id", ""),
+        "requested": request.get("ratingKey", ""),
+        "played": _rating_of(playable),
+        "kind": _kind(playable),
+    }
+    # Tests open playback themselves and call _note_playback_started.
+    if _HOOKS.get("open") is not None:
+        return
+    global _AV_SLOT
+    if _AV_SLOT is not None:
+        return
+    try:
+        from lib import player
+        player.PLAYER.on("av.started", _on_av_started)
+        _AV_SLOT = _on_av_started
+    except Exception:
+        LOG("Remote play: start watch failed")
+
+
+def _disarm_playback():
+    """Drop the start signal. The in-flight session flag is left alone."""
+    global _ARMED, _AV_SLOT
+    _ARMED = None
+    slot = _AV_SLOT
+    _AV_SLOT = None
+    if slot is None:
+        return
+    try:
+        from lib import player
+        player.PLAYER.off("av.started", slot)
+    except Exception:
+        pass
+
+
+def _on_av_started(**kwargs):
+    try:
+        _note_playback_started()
+    except Exception:
+        LOG("Remote play: start notify failed")
+
+
+def _note_playback_started():
+    """Playback has started. Further play requests may replace this item.
+
+    The player window is still open. Busy ends here, not when that window
+    closes. Tests call this when their open hook stands in for the player.
+    """
+    global _BUSY, _IN_PLAYBACK
+    with _LOCK:
+        armed = _ARMED
+        if not armed or _IN_PLAYBACK:
+            return
+        _IN_PLAYBACK = True
+        _BUSY = False
+    result = _result(
+        True, "started", armed["id"], armed["requested"], armed["played"], armed["kind"]
+    )
+    _publish(result)
+    LOG("Remote play: ok type={0}", armed["kind"] or "item")
+    _stop_if_replacement_waiting()
 
 
 def _to_playable(item):
@@ -410,8 +597,72 @@ def _stop_playback():
     hook = _HOOKS.get("stop")
     if hook is not None:
         return hook()
-    import xbmc
-    xbmc.Player().stop()
+    _stop_cleanly()
+
+
+def _plex_player():
+    hook = _HOOKS.get("player")
+    if hook is not None:
+        return hook() if callable(hook) else hook
+    from lib import player
+    return player.PLAYER
+
+
+def _playhead_ms(plex_player, handler):
+    """Current position in milliseconds, or None when it cannot be read."""
+    current = None
+    try:
+        current = plex_player.getTime()
+    except Exception:
+        current = None
+    if current is None and handler is not None:
+        try:
+            current = handler.trueTime
+        except Exception:
+            current = None
+    if current is None:
+        return None
+    try:
+        return max(0, int(float(current) * 1000))
+    except Exception:
+        return None
+
+
+def _stop_cleanly():
+    """Stop playback so Plex keeps the resume point and post-play does not take over.
+
+    The final timeline is sent while the playhead is still known. A later
+    stopped event must not overwrite that position, and it must not advance
+    to post-play or the next episode.
+    """
+    try:
+        plex_player = _plex_player()
+    except Exception:
+        LOG("Remote play: stop failed")
+        return
+    if plex_player is None:
+        return
+    handler = getattr(plex_player, "handler", None)
+    dialog = getattr(handler, "dialog", None) if handler is not None else None
+    offset = _playhead_ms(plex_player, handler)
+    state = getattr(plex_player, "STATE_STOPPED", "stopped")
+    if offset is not None:
+        try:
+            if dialog is not None and hasattr(dialog, "sendTimeline"):
+                dialog.sendTimeline(state=state, t=offset)
+            elif handler is not None and hasattr(handler, "updateNowPlaying"):
+                handler.updateNowPlaying(state=state, t=offset, overrideChecks=True)
+                handler.ignoreTimelines = True
+        except Exception:
+            LOG("Remote play: stop timeline failed")
+    if handler is not None:
+        handler.terminated = True
+        handler.skipPostPlay = True
+        handler.stoppedManually = True
+    try:
+        plex_player.stop()
+    except Exception:
+        LOG("Remote play: stop failed")
 
 
 def _sleep_once():

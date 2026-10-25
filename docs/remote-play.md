@@ -21,8 +21,15 @@ to use the server selected in PlexMod. `resume` defaults to resuming when the
 item has progress, otherwise starting at the beginning, with no prompt.
 `resume` `false` always starts at the beginning. `resume` `"ask"` is the
 on-screen play button, including its resume prompt. `force` `true` stops
-whatever video is already playing first. Without `force`, an in-progress
-video is left alone.
+video that is already playing and was not started by this command. Without
+`force`, that video is left alone.
+
+Once this command has started playback, it is no longer busy. A later play
+request stops that playback and plays the new item. The stop reports the
+current position to Plex first, so the resume point is kept, and playback
+does not continue into post-play or the next episode. Until playback has
+started, another request is refused with `busy`, including when `force` is
+set.
 
 A show or season key plays the next episode: for a show, the server's On Deck
 item, otherwise the first unwatched episode; for a season, an in-progress
@@ -61,8 +68,9 @@ curl -s -X POST -H 'Content-Type: application/json' \
 ## Result
 
 The latest result is a Kodi window property, `script.plex.remoteplay`.
-`state` is `pending` while the request is in progress, then `ok` or `error`.
-Wait until it is not `pending`. A Kodi notification is also shown, and a
+`state` is `pending` until playback has started, then `ok` or `error`.
+Wait until it is not `pending`. After `started`, the item keeps playing and
+another play request can replace it. A Kodi notification is also shown, and a
 `Remote play:` line is written to the log.
 
 ```bash
@@ -84,8 +92,9 @@ The label value is JSON:
 `reason` on failure is one of `bad_request`, `not_running`, `not_ready`,
 `playing`, `busy`, `no_server`, `ambiguous_server`, `not_found`,
 `unsupported`, `nothing_to_play`, `unavailable`, `error`. `playing` means a
-video was already playing and `force` was not set. An empty property means
-the running instance did not receive the request.
+video was already playing, this command did not start it, and `force` was
+not set. `busy` means a request is still starting playback. An empty property
+means the running instance did not receive the request.
 
 The same JSON is also stored on `script.plex.remoteplay.<id>` when the
 request has an id.

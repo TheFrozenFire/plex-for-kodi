@@ -20,6 +20,54 @@ _FORBIDDEN = frozenset((
 ))
 
 
+class _Timeline(object):
+    def __init__(self):
+        self.events = []
+
+    def sendTimeline(self, state=None, t=None, ensureFinalTimelineEvent=True):
+        self.events.append((state, t))
+
+
+class _StopHandler(object):
+    def __init__(self, dialog):
+        self.dialog = dialog
+        self.terminated = False
+        self.skipPostPlay = False
+        self.stoppedManually = False
+        self.ignoreTimelines = False
+        self.trueTime = 0
+        self.updates = []
+        self.events_at_stop = []
+        self.ignore_at_stop = False
+
+    def updateNowPlaying(self, state=None, t=None, overrideChecks=False):
+        self.updates.append((state, t, overrideChecks))
+
+
+class _StopPlayer(object):
+    STATE_STOPPED = "stopped"
+
+    def __init__(self, handler, seconds):
+        self.handler = handler
+        self.seconds = seconds
+        self.stops = []
+
+    def getTime(self):
+        if self.seconds is None:
+            raise RuntimeError("no clock")
+        return self.seconds
+
+    def stop(self):
+        dialog = self.handler.dialog
+        self.handler.events_at_stop = list(dialog.events) if dialog is not None else []
+        self.handler.ignore_at_stop = self.handler.ignoreTimelines
+        self.stops.append((
+            self.handler.terminated,
+            self.handler.skipPostPlay,
+            self.handler.stoppedManually,
+        ))
+
+
 class _Offset(object):
     def __init__(self, value):
         self.value = value
@@ -207,6 +255,129 @@ class RemotePlayTest(KodiTestCase):
         result = remoteplay.submit(remoteplay.normalize({"ratingKey": "55", "force": "1", "id": "busy3"}))
         self.assertEqual("playing", result["reason"])
         self.assertFalse(self.opened)
+
+    def test_playback_start_accepts_a_new_request_and_replaces_playback(self):
+        # The player window stays open after playback starts. A later request
+        # must not nest another window inside it: stop, unwind, then play.
+        remoteplay._HOOKS["fetch"] = lambda server, rating_key: _Item("movie", rating_key)
+        remoteplay._HOOKS["open"] = self._open_until_replaced
+
+        self.opened_ids = []
+        result = remoteplay.submit(remoteplay.normalize({"ratingKey": "1", "id": "a"}))
+
+        self.assertEqual("started", self.during["reason"])
+        self.assertEqual("a", self.during["id"])
+        self.assertEqual("1", self.during["ratingKey"])
+        self.assertEqual("pending", self.second["state"])
+        self.assertEqual("b", self.second["id"])
+        self.assertNotIn("reason", self.second)
+        self.assertEqual(["a"], self.opened_at_request)
+        self.assertEqual([1], self.stopped_at_request)
+        self.assertEqual(["a", "b"], self.opened_ids)
+        self.assertEqual([1], self.stopped)
+        self.assertEqual("b", result["id"])
+        self.assertEqual("2", result["ratingKey"])
+        self.assertTrue(result["ok"])
+        self.assertFalse(remoteplay._BUSY)
+        self.assertFalse(remoteplay._IN_PLAYBACK)
+        self.assertTrue(ENV.logged("Remote play: replacing"))
+        self.assertFalse(ENV.logged("reason=busy"))
+
+    def _open_until_replaced(self, item, request):
+        self.opened_ids.append(request["id"])
+        self.playing = True
+        remoteplay._note_playback_started()
+        if request["id"] == "a":
+            self.assertFalse(remoteplay._BUSY)
+            self.assertTrue(remoteplay._IN_PLAYBACK)
+            self.during = self._result()
+            self.second = remoteplay.submit(remoteplay.normalize({"ratingKey": "2", "id": "b"}))
+            self.opened_at_request = list(self.opened_ids)
+            self.stopped_at_request = list(self.stopped)
+        self.playing = False
+        return ""
+
+    def test_force_stays_busy_until_playback_starts(self):
+        remoteplay._HOOKS["fetch"] = lambda server, rating_key: _Item("movie", rating_key)
+        self.opened_ids = []
+
+        def open_hook(item, request):
+            self.opened_ids.append(request["id"])
+            if request["id"] == "a":
+                self.early = remoteplay.submit(remoteplay.normalize({
+                    "ratingKey": "2", "force": True, "id": "b",
+                }))
+                self.assertTrue(remoteplay._BUSY)
+                self.playing = True
+                remoteplay._note_playback_started()
+                self.assertFalse(remoteplay._BUSY)
+            self.playing = False
+            return ""
+
+        remoteplay._HOOKS["open"] = open_hook
+        result = remoteplay.submit(remoteplay.normalize({"ratingKey": "1", "id": "a"}))
+        self.assertEqual("busy", self.early["reason"])
+        self.assertEqual(["a"], self.opened_ids)
+        self.assertFalse(self.stopped)
+        self.assertEqual("a", result["id"])
+        self.assertTrue(result["ok"])
+        self.assertTrue(ENV.logged("reason=busy"))
+
+    def test_background_request_after_start_replaces_playback(self):
+        remoteplay._HOOKS["fetch"] = lambda server, rating_key: _Item("movie", rating_key)
+        self.opened_ids = []
+        holder = {}
+
+        def open_hook(item, request):
+            self.opened_ids.append(request["id"])
+            self.playing = True
+            remoteplay._note_playback_started()
+            if request["id"] == "a":
+                def worker():
+                    holder["result"] = remoteplay.submit(remoteplay.normalize({
+                        "ratingKey": "2", "force": "1", "id": "b",
+                    }))
+
+                thread = threading.Thread(target=worker)
+                thread.start()
+                thread.join(2)
+                self.assertFalse(thread.is_alive())
+                remoteplay.drain()
+                self.assertEqual(["a"], list(self.opened_ids))
+                self.assertEqual([1], list(self.stopped))
+            self.playing = False
+            return ""
+
+        remoteplay._HOOKS["open"] = open_hook
+        result = remoteplay.submit(remoteplay.normalize({"ratingKey": "1", "id": "a"}))
+        self.assertIsNone(holder["result"])
+        self.assertEqual(["a", "b"], self.opened_ids)
+        self.assertEqual("b", result["id"])
+        self.assertTrue(result["ok"])
+        self.assertTrue(ENV.logged("Remote play: replacing"))
+        self.assertFalse(ENV.logged("reason=busy"))
+
+    def test_stop_reports_the_playhead_before_stopping(self):
+        dialog = _Timeline()
+        handler = _StopHandler(dialog)
+        player = _StopPlayer(handler, 12.5)
+        remoteplay._HOOKS["stop"] = None
+        remoteplay._HOOKS["player"] = player
+
+        remoteplay._stop_playback()
+
+        self.assertEqual([("stopped", 12500)], dialog.events)
+        self.assertEqual([(True, True, True)], player.stops)
+        self.assertEqual([("stopped", 12500)], handler.events_at_stop)
+
+        handler.dialog = None
+        player.seconds = None
+        handler.trueTime = 8.25
+        remoteplay._stop_playback()
+
+        self.assertEqual([("stopped", 8250, True)], handler.updates)
+        self.assertTrue(player.stops[-1][0])
+        self.assertTrue(handler.ignore_at_stop)
 
     def test_missing_server_ambiguous_server_and_unsupported(self):
         remoteplay._HOOKS["manager"] = lambda: _Manager([], None)
