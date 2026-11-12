@@ -21,6 +21,7 @@ _QUEUED = []
 _BUSY = False
 _APPLYING = False
 _MAX_DEFER = 3
+_STATUS_ARMED = False
 
 # Tests replace entries. None means the real Kodi / window implementation.
 _HOOKS = {
@@ -36,13 +37,21 @@ _HOOKS = {
 
 
 def _reset_for_tests():
-    global _BUSY, _APPLYING
+    global _BUSY, _APPLYING, _STATUS_ARMED
     with _LOCK:
         _BUSY = False
         _APPLYING = False
         del _QUEUED[:]
     for key in _HOOKS:
         _HOOKS[key] = None
+    if _STATUS_ARMED:
+        try:
+            from plexnet import plexapp
+            plexapp.util.APP.off("change:user", _republish_user_status)
+            plexapp.util.APP.off("account:response", _republish_user_status)
+        except Exception:
+            pass
+        _STATUS_ARMED = False
 
 
 def parse_notification(data):
@@ -53,6 +62,15 @@ def parse_notification(data):
     dest = str(payload.get("to") or "").strip().lower()
     if dest == "home":
         return {"to": "home"}
+    if dest == "user":
+        user_id = str(payload.get("id") or payload.get("user") or "").strip()
+        if not user_id:
+            return None
+        request = {"to": "user", "id": user_id}
+        pin = payload.get("pin")
+        if pin:
+            request["pin"] = str(pin)
+        return request
     if dest != "section":
         return None
     kind = str(payload.get("type") or "").strip().lower()
@@ -150,6 +168,8 @@ def _valid(request):
         return False
     if request.get("to") == "home":
         return True
+    if request.get("to") == "user":
+        return bool(str(request.get("id") or "").strip())
     if request.get("to") != "section":
         return False
     if request.get("title"):
@@ -163,6 +183,8 @@ def _perform(request):
     ``defer`` means a PlexMod window is still on top of Home. Closing it
     returns to Home on the next pass; the request stays queued.
     """
+    if request.get("to") == "user":
+        return ("user", request)
     if _is_playing():
         LOG("Remote nav: ignored reason=playing")
         return None
@@ -198,6 +220,8 @@ def _finish(action, request):
             _QUEUED.insert(0, request)
         _poke_gui()
         return None
+    if kind == "user":
+        return _switch_user(action[1])
     if kind == "focus":
         with _LOCK:
             _APPLYING = True
@@ -506,3 +530,183 @@ def _coerce(data):
         except Exception:
             return None
     return loaded
+
+
+def publish_user_status(account=None):
+    """Write the signed-in user to ``script.plex.userstatus``.
+
+    External controllers read this to see who is active, including whether
+    plex.tv is currently offline. The value never includes a token or a PIN.
+    """
+    if account is None:
+        account = _account()
+    payload = {"id": "", "name": "", "offline": False, "signedIn": False}
+    if account is not None:
+        ident = getattr(account, "ID", None)
+        payload["id"] = "" if ident is None else str(ident)
+        payload["name"] = getattr(account, "title", None) or getattr(account, "username", None) or ""
+        payload["offline"] = bool(getattr(account, "isOffline", False))
+        payload["signedIn"] = bool(getattr(account, "isSignedIn", False))
+    _store_json("userstatus", payload)
+    return payload
+
+
+def arm_user_status():
+    """Publish the current user and keep the property updated.
+
+    Called at startup. Home open publishes again. ``change:user`` and
+    ``account:response`` publish on every later change, including offline.
+    """
+    global _STATUS_ARMED
+    if not _STATUS_ARMED:
+        try:
+            from plexnet import plexapp
+            plexapp.util.APP.on("change:user", _republish_user_status)
+            plexapp.util.APP.on("account:response", _republish_user_status)
+            _STATUS_ARMED = True
+        except Exception:
+            LOG("User status: arm failed")
+    return publish_user_status()
+
+
+def refresh_if_offline(account, timeout=30):
+    """Refresh once when plex.tv has been marked offline.
+
+    True when the account is usable for a switch (including local mode).
+    False when plex.tv is still unreachable or the refresh timed out.
+    ``account.lastAccountError`` is ``timeout`` or ``unreachable``.
+    """
+    if account is None:
+        return False
+    if not getattr(account, "isOffline", False):
+        return True
+    if _local_mode():
+        return True
+    if not getattr(account, "authToken", None):
+        account.lastAccountError = "unreachable"
+        return False
+    try:
+        from lib import plex
+        from plexnet import plexapp
+        with plex.CallbackEvent(plexapp.util.APP, "account:response", timeout=timeout):
+            account.refreshAccount()
+    except Exception:
+        LOG("User status: refresh failed")
+    return not getattr(account, "isOffline", False)
+
+
+def _republish_user_status(*args, **kwargs):
+    try:
+        account = kwargs.get("account")
+        publish_user_status(account if account is not None else None)
+    except Exception:
+        LOG("User status: publish failed")
+
+
+def _switch_user(request):
+    """Switch to the home user ``request`` names and report the real outcome."""
+    user_id = str(request.get("id") or "")
+    pin = request.get("pin") or ""
+    account = _account()
+    if account is None:
+        return _finish_user(False, "not_ready", user_id)
+    if getattr(account, "isOffline", False) and not _local_mode():
+        if not refresh_if_offline(account):
+            reason = getattr(account, "lastAccountError", None) or "unreachable"
+            if reason not in ("timeout", "unreachable"):
+                reason = "unreachable"
+            publish_user_status(account)
+            return _finish_user(False, reason, user_id)
+    previous = str(getattr(account, "ID", "") or "")
+    try:
+        from plexnet.exceptions import UserSwitchForbiddenException
+        from lib import plex
+        from plexnet import plexapp
+        with plex.CallbackEvent(plexapp.util.APP, "account:response", timeout=30) as ev:
+            try:
+                started = account.switchHomeUser(user_id, pin, silent=True)
+            except UserSwitchForbiddenException:
+                ev.close()
+                publish_user_status(account)
+                return _finish_user(False, "forbidden", user_id)
+            if not started:
+                ev.close()
+                publish_user_status(account)
+                return _finish_user(False, "rejected", user_id)
+            if not getattr(account, "switchUser", False):
+                # Already finished (fast failure or the same user).
+                ev.close()
+    except Exception:
+        LOG("Remote switch: failed reason=error")
+        return _finish_user(False, "error", user_id)
+    publish_user_status(account)
+    if str(getattr(account, "ID", "") or "") != user_id:
+        reason = getattr(account, "switchError", None) or "unchanged"
+        return _finish_user(False, reason, user_id)
+    if previous != user_id and not _is_playing():
+        _rebuild_home()
+    reason = "same" if previous == user_id else "switched"
+    return _finish_user(True, reason, user_id)
+
+
+def _finish_user(ok, reason, user_id):
+    result = _user_result(ok, reason, user_id)
+    _store_json("userswitch", result)
+    if ok:
+        LOG("Remote switch: ok reason={0}", reason)
+    else:
+        LOG("Remote switch: failed reason={0}", reason)
+    return result
+
+
+def _user_result(ok, reason, user_id):
+    account = _account()
+    offline = bool(getattr(account, "isOffline", False)) if account is not None else False
+    return {
+        "ok": bool(ok),
+        "to": "user",
+        "id": str(user_id or ""),
+        "reason": reason,
+        "offline": offline,
+    }
+
+
+def _store_json(key, payload):
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    try:
+        from .properties import setGlobalProperty
+        setGlobalProperty(key, body)
+    except Exception:
+        LOG("User status: publish failed")
+    return body
+
+
+def _rebuild_home():
+    """Close Home so the main loop reopens it as the user we just became."""
+    try:
+        from .windows import windowutils
+        home = windowutils.HOME
+        if not home:
+            return
+        home.closeOption = "user_switched"
+        closer = getattr(home, "doClose", None)
+        if callable(closer):
+            closer()
+    except Exception:
+        LOG("Remote switch: home refresh failed")
+
+
+def _account():
+    try:
+        from plexnet import plexapp
+        return plexapp.ACCOUNT
+    except Exception:
+        return None
+
+
+def _local_mode():
+    try:
+        from plexnet import util as plex_util
+        return bool(plex_util.LOCAL_MODE)
+    except Exception:
+        return False

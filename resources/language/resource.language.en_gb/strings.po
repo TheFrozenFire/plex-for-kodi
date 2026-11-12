@@ -3476,3 +3476,7 @@ msgstr ""
 msgctxt "#35083"
 msgid "Skipped"
 msgstr ""
+
+msgctxt "#35084"
+msgid "plex.tv didn't answer in time. Staying on the current user."
+msgstr ""

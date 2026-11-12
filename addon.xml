@@ -34,6 +34,7 @@
         <source>https://github.com/pannal/plex-for-kodi</source>
         <platform>all</platform>
         <news>
+- Switch User: a slow plex.tv reply no longer sticks on the previous user
 - Detail screens: show the server's clear logo instead of the written title
 - Local mode: allow insecure connections, and say so
 - Detail screens: size the clear logo properly, and show it on episodes too

@@ -16,6 +16,15 @@ from .exceptions import UserSwitchForbiddenException
 
 ACCOUNT = None
 
+# Identity captured before a home-user switch adopts the new token. A failed
+# validation puts these back so the token and the signed-in user stay paired.
+_SWITCH_FIELDS = (
+    "ID", "title", "username", "email", "thumb", "authToken", "pin",
+    "isSignedIn", "isOffline", "isAuthenticated", "isExpired",
+    "isPlexPass", "isManaged", "isSecure", "isAdmin", "isProtected",
+    "hasQueue", "adminHasPlexPass",
+)
+
 
 class HomeUser(util.AttributeDict):
     def __repr__(self):
@@ -52,6 +61,14 @@ class MyPlexAccount(object):
         self.isProtected = False
         self.switchUser = False
         self.forceResourceRefresh = False
+        # Why the last switch validation failed: "timeout", "unreachable",
+        # "rejected", or None. Callers use this instead of assuming success.
+        self.switchError = None
+        # Same classification for the last account request, including a refresh
+        # that was not a user switch.
+        self.lastAccountError = None
+        self._switchSnapshot = None
+        self._switchValidateTries = 0
 
         # local mode: the current user's per-server access tokens ({machineIdentifier: token}),
         # loaded from the LocalUsers registry on setLocal()/local user switches
@@ -368,6 +385,10 @@ class MyPlexAccount(object):
 
         if response.isSuccess():
             data = response.getBodyXml()
+            self._switchSnapshot = None
+            self._switchValidateTries = 0
+            self.switchError = None
+            self.lastAccountError = None
 
             # The user is signed in
             self.isSignedIn = True
@@ -446,17 +467,44 @@ class MyPlexAccount(object):
                 self.forceResourceRefresh = False
 
         elif response.getStatus() >= 400 and response.getStatus() < 500:
-            # The user is specifically unauthorized, clear everything
-            util.WARN_LOG("Sign Out: User is unauthorized")
-            self.signOut(True)
+            # A rejected switch token must not sign the current user out.
+            if self._switchSnapshot is not None and not util.LOCAL_MODE:
+                self.switchError = "rejected"
+                self.lastAccountError = "rejected"
+                util.WARN_LOG("User switch was rejected; staying on the current user")
+                self._restoreSwitchState()
+                self.switchUser = None
+            else:
+                # The user is specifically unauthorized, clear everything
+                util.WARN_LOG("Sign Out: User is unauthorized")
+                self.signOut(True)
         else:
-            # Unexpected error, keep using whatever we read from the registry
-            util.WARN_LOG("Unexpected response from plex.tv ({0}), switching to OFFLINE mode".format(response.getStatus()))
-            self.logState()
-            self.isOffline = True
-            # consider a single, unprotected user authenticated
-            if not self.isAuthenticated and not self.isProtected:
-                self.isAuthenticated = True
+            kind = self._accountFailureKind(context)
+            if self._switchSnapshot is not None and not util.LOCAL_MODE:
+                # The new token is already in authToken. Retry once, then put
+                # the previous user back. Never latch offline on this path:
+                # that used to leave the old id paired with the new token and
+                # made every later Switch User press skip the picker.
+                if kind in ("timeout", "unreachable") and self._switchValidateTries < 1:
+                    self._switchValidateTries += 1
+                    self.lastAccountError = kind
+                    util.WARN_LOG("User switch validation failed ({0}); retrying", kind)
+                    self._retrySwitchValidation()
+                    return
+                self.switchError = kind if kind in ("timeout", "unreachable") else "error"
+                self.lastAccountError = self.switchError
+                util.WARN_LOG("User switch validation failed ({0}); staying on the current user", self.switchError)
+                self._restoreSwitchState()
+                self.switchUser = None
+            else:
+                # Unexpected error, keep using whatever we read from the registry
+                self.lastAccountError = kind if kind in ("timeout", "unreachable") else "error"
+                util.WARN_LOG("Unexpected response from plex.tv ({0}), switching to OFFLINE mode".format(response.getStatus()))
+                self.logState()
+                self.isOffline = True
+                # consider a single, unprotected user authenticated
+                if not self.isAuthenticated and not self.isProtected:
+                    self.isAuthenticated = True
 
         util.APP.clearInitializer("myplex")
         # Logger().UpdateSyslogHeader()  # TODO: ------------------------------------------------------------------------------------------------------IMPLEMENT
@@ -467,7 +515,52 @@ class MyPlexAccount(object):
 
         util.APP.trigger("account:response")
 
+    def _captureSwitchState(self):
+        self._switchSnapshot = dict((key, getattr(self, key)) for key in _SWITCH_FIELDS)
+        self._switchValidateTries = 0
+        self.switchError = None
+
+    def _restoreSwitchState(self):
+        snap = self._switchSnapshot
+        self._switchSnapshot = None
+        self._switchValidateTries = 0
+        if not snap:
+            return
+        for key, value in snap.items():
+            setattr(self, key, value)
+        self.revalidatePlexPass = False
+
+    def _accountFailureKind(self, context):
+        kind = getattr(context, "failure", None) if context is not None else None
+        if kind in ("timeout", "unreachable", "error"):
+            return kind
+        # No body (status 0) is the historical read-timeout path.
+        return "timeout"
+
+    def _switchRetryTimeout(self):
+        # One slower attempt after the normal plex.tv read timeout (2s).
+        # 10s is enough for a late sign-in response and still bounded.
+        read = 10.0
+        connect = 5.0
+        base = util.PLEXTV_TIMEOUT
+        try:
+            if base is not None:
+                read = max(read, float(base) * 3.0)
+                connect = max(connect, float(base.getConnectTimeout()) * 3.0)
+        except Exception:
+            pass
+        return asyncadapter.AsyncTimeout(read).setConnectTimeout(connect)
+
+    def _retrySwitchValidation(self):
+        # authToken is still the token from the switch response. The snapshot
+        # stays in place so a second failure can put the previous user back.
+        self.validateToken(self.authToken, True, self.forceResourceRefresh,
+                           timeout=self._switchRetryTimeout())
+
     def signOut(self, expired=False):
+        self._switchSnapshot = None
+        self._switchValidateTries = 0
+        self.switchError = None
         # Strings
         self.ID = None
         self.title = None
@@ -506,16 +599,23 @@ class MyPlexAccount(object):
     def hasPlexPass(self):
         return self.isPlexPass or self.adminHasPlexPass
 
-    def validateToken(self, token, switch_user=False, force_resource_refresh=False):
+    def validateToken(self, token, switch_user=False, force_resource_refresh=False, timeout=None):
+        # Remember who we are before the new token replaces the old one. The
+        # sign-in request reads the token from the account, so it has to be
+        # installed now, but a failed switch must be able to undo that.
+        if switch_user and self._switchSnapshot is None and not util.LOCAL_MODE:
+            self._captureSwitchState()
         self.authToken = token
         self.switchUser = switch_user
         self.forceResourceRefresh = force_resource_refresh
 
         request = myplexrequest.MyPlexRequest("/users/sign_in.xml")
         context = request.createRequestContext("sign_in", callback.Callable(self.onAccountResponse),
-                                               timeout=util.PLEXTV_TIMEOUT)
-        if self.isOffline:
-            context.timeout = self.isOffline and asyncadapter.AsyncTimeout(1).setConnectTimeout(1)
+                                               timeout=timeout or util.PLEXTV_TIMEOUT)
+        # A switch has its own timeout (and a slower retry). The 1s offline
+        # cap is for background account checks, not for adopting a user.
+        if self.isOffline and not switch_user:
+            context.timeout = asyncadapter.AsyncTimeout(1).setConnectTimeout(1)
         util.APP.startRequest(request, context, {})
 
     def refreshAccount(self):

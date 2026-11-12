@@ -23,6 +23,39 @@ codes = requests.codes
 status_codes = requests.status_codes._codes
 
 
+def failure_kind(exc):
+    """A plex.tv transport failure: ``timeout``, ``unreachable``, or ``error``.
+
+    Read and connect timeouts are ``timeout``. DNS failures, refused
+    connections, and protocol errors are ``unreachable``.
+    """
+    if exc is None:
+        return "error"
+    if "Timeout" in type(exc).__name__:
+        return "timeout"
+    if isinstance(exc, (requests.exceptions.ConnectionError, urllib3.exceptions.ProtocolError)):
+        return "unreachable"
+    return "error"
+
+
+def _complete_account_failure(context, kind):
+    """Finish an account request that failed before a response existed.
+
+    Timeouts already reach the callback. Connection errors used to return
+    without one, so a user switch could keep the new token and never settle.
+    """
+    if context is None:
+        return False
+    context.failure = kind
+    if getattr(context, "requestType", None) not in ("account", "sign_in"):
+        return False
+    callback_ = getattr(context, "callback", None)
+    if not callback_:
+        return False
+    callback_(None, context)
+    return True
+
+
 DEFAULT_TIMEOUT = asyncadapter.AsyncTimeout(util.TIMEOUT).setConnectTimeout(util.TIMEOUT)
 
 RESOLVED_PD_HOSTS = {}
@@ -156,19 +189,25 @@ class HttpRequest(object):
 
             if self._cancel:
                 return
-        except asyncadapter.TimeoutException:
+        except asyncadapter.TimeoutException as exc:
             from . import plexapp
+            if context is not None:
+                context.failure = failure_kind(exc)
             plexapp.util.APP.onRequestTimeout(context)
             self.removeAsPending()
             return
         except asyncadapter.CanceledException:
             return
-        except (urllib3.exceptions.ProtocolError, requests.exceptions.ConnectionError):
+        except (urllib3.exceptions.ProtocolError, requests.exceptions.ConnectionError) as exc:
             self.removeAsPending()
+            _complete_account_failure(context, failure_kind(exc))
             return
         except Exception as e:
             util.ERROR('Request failed {0}'.format(util.cleanToken(self.url)))
+            if context is not None:
+                context.failure = failure_kind(e)
             if not hasattr(e, 'response'):
+                _complete_account_failure(context, failure_kind(e))
                 return
             res = e.response
 

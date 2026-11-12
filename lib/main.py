@@ -216,6 +216,24 @@ def updateLastUsedAddon():
         util.setGlobalProperty('ignore_spinner', '')
 
 
+def userPickerAllowed(account=None, local_mode=None):
+    """True when Switch User should open the picker.
+
+    Offline, outside local mode, is not a picker. The caller refreshes the
+    account first and, if plex.tv is still unreachable, says so.
+    """
+    if account is None:
+        account = plexapp.ACCOUNT
+    if local_mode is None:
+        local_mode = bool(plexapp.util.LOCAL_MODE)
+    if getattr(account, "isOffline", False) and not local_mode:
+        return False
+    if getattr(account, "isAuthenticated", False):
+        return False
+    users = getattr(account, "homeUsers", None) or []
+    return len(users) > 1 or bool(getattr(account, "isProtected", False))
+
+
 def _main():
     global quitKodi, restart, exit_timer_started, skipEnsureLastUsed
 
@@ -242,15 +260,15 @@ def _main():
     try:
         while not util.MONITOR.abortRequested():
             if plex.init(local=util.getSetting('local_mode', False)):
+                try:
+                    from lib import remotenav
+                    remotenav.arm_user_status()
+                except Exception:
+                    util.DEBUG_LOG("User status: arm failed")
                 background.setSplash(False)
                 fromSwitch = False
                 while not util.MONITOR.abortRequested():
-                    if (
-                        (not plexapp.ACCOUNT.isOffline or plexapp.util.LOCAL_MODE) and not
-                        plexapp.ACCOUNT.isAuthenticated and
-                        (len(plexapp.ACCOUNT.homeUsers) > 1 or plexapp.ACCOUNT.isProtected)
-
-                    ):
+                    if userPickerAllowed():
                         oldAccID = plexapp.ACCOUNT.ID
                         result = userselect.start(BACKGROUND._winID)
                         tries = 0
@@ -359,6 +377,17 @@ def _main():
                             break
                         elif closeOption == 'switch':
                             background.setBusy(True)
+                            if plexapp.ACCOUNT.isOffline and not plexapp.util.LOCAL_MODE:
+                                util.DEBUG_LOG('Main: Switch User while offline, refreshing account')
+                                from lib import remotenav
+                                if not remotenav.refresh_if_offline(plexapp.ACCOUNT):
+                                    background.setBusy(False)
+                                    util.messageDialog(
+                                        util.T(32342, 'Switch User'),
+                                        util.T(32449, "Can't connect to plex.tv[CR]Check your internet connection and try again."))
+                                    plexapp.ACCOUNT.isAuthenticated = True
+                                    fromSwitch = False
+                                    continue
                             util.DEBUG_LOG('Main: Switching users...: {}', plexapp.ACCOUNT.ID)
                             plexapp.ACCOUNT.isAuthenticated = False
                             fromSwitch = True
@@ -367,7 +396,7 @@ def _main():
                                 uid = closeOption['fast_switch']
                                 util.DEBUG_LOG('Main: Fast-Switching users...: {}', uid)
                                 util.setSetting('previous_user', plexapp.ACCOUNT.ID)
-                                with busy.BusySignalContext(plexapp.util.APP, "account:response", wait_max=10):
+                                with busy.BusySignalContext(plexapp.util.APP, "account:response", wait_max=30):
                                     if plexapp.ACCOUNT.switchHomeUser(uid, silent=True) and plexapp.ACCOUNT.switchUser:
                                         util.DEBUG_LOG('Waiting for user change...')
 

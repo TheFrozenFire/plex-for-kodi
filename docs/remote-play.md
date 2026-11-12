@@ -134,3 +134,27 @@ add-on does not fall back to the first library of that type.
 
 Nothing happens while a video is playing. Any other payload is ignored.
 Each result is a `Remote nav:` line in the log.
+
+### Switch user
+
+`{"to":"user","id":"USER_ID"}` switches to that Plex Home user. `pin` is
+optional. The result is `script.plex.userswitch`:
+
+```json
+{"id":"2","offline":false,"ok":false,"reason":"timeout","to":"user"}
+```
+
+`reason` is `switched` or `same` on success. A failed attempt is `timeout`
+when plex.tv did not answer in time, or `unreachable` when plex.tv could not
+be contacted. The signed-in user does not change on either failure.
+
+### Who is signed in
+
+`script.plex.userstatus` is the current user. It is written at startup, when
+Home opens, and on every user change or account response.
+
+```json
+{"id":"1","name":"User A","offline":false,"signedIn":true}
+```
+
+`offline` is true when plex.tv could not be reached. The value has no token.

@@ -4663,6 +4663,12 @@ class HomeWindow(kodigui.BaseWindow, util.CronReceiver, CommonMixin, SpoilersMix
             self.setProperty('server.iconmod', '')
             self.setProperty('server.iconmod2', '')
 
+        try:
+            from lib import remotenav
+            remotenav.publish_user_status()
+        except Exception:
+            util.DEBUG_LOG("Home: user status publish failed")
+
     def cleanTasks(self):
         self.tasks = [t for t in self.tasks if t]
 
