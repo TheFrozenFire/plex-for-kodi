@@ -206,6 +206,19 @@ class UserSelectWindow(kodigui.BaseWindow):
             item.setProperty('pin', item.dataSource.title)
             item.setProperty('editing.pin', '')
 
+    def _switchFailed(self, item):
+        item.setProperty('pin', item.dataSource.title)
+        item.setProperty('editing.pin', '')
+        reason = getattr(plexapp.ACCOUNT, 'switchError', None)
+        if reason == 'unreachable':
+            util.messageDialog(
+                T(32427, 'Failed'),
+                T(32449, "Can't connect to plex.tv[CR]Check your internet connection and try again."))
+        else:
+            util.messageDialog(
+                T(32427, 'Failed'),
+                T(35084, "plex.tv didn't answer in time. Staying on the current user."))
+
     @busy.dialog()
     def userSelected(self, item, pin=None):
         user = item.dataSource
@@ -213,22 +226,34 @@ class UserSelectWindow(kodigui.BaseWindow):
         util.DEBUG_LOG('Home user selected: {0}', user)
 
         from lib import plex
-        with plex.CallbackEvent(plexapp.util.APP, 'account:response') as e:
+        # The sign-in check can use the normal timeout and then one slower
+        # retry. 30s covers both.
+        with plex.CallbackEvent(plexapp.util.APP, 'account:response', timeout=30) as e:
             try:
-                if plexapp.ACCOUNT.switchHomeUser(user.id, pin) and plexapp.ACCOUNT.switchUser:
-                    util.DEBUG_LOG('Waiting for user change...')
-                else:
-                    e.close()
-                    item.setProperty('pin', item.dataSource.title)
-                    item.setProperty('editing.pin', '')
-                    util.messageDialog(T(32427, 'Failed'), T(32926, 'Wrong pin entered!'))
-                    return
+                started = plexapp.ACCOUNT.switchHomeUser(user.id, pin)
             except UserSwitchForbiddenException:
                 # re-fetch users
                 plexapp.ACCOUNT.updateHomeUsers()
                 self.selected = 'retry'
                 self.doClose()
                 return
+            if not started:
+                e.close()
+                item.setProperty('pin', item.dataSource.title)
+                item.setProperty('editing.pin', '')
+                util.messageDialog(T(32427, 'Failed'), T(32926, 'Wrong pin entered!'))
+                return
+            # switchUser is still set while validation is in flight. A very
+            # fast failure clears it before we get here; don't call that a
+            # wrong PIN, and don't treat it as a completed switch.
+            if plexapp.ACCOUNT.switchUser:
+                util.DEBUG_LOG('Waiting for user change...')
+            else:
+                e.close()
+
+        if str(plexapp.ACCOUNT.ID) != str(user.id):
+            self._switchFailed(item)
+            return
 
         self.selected = True
         self.doClose()
